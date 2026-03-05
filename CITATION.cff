@@ -5,6 +5,7 @@ type: software
 repository-code: https://github.com/teamtomo/teamtomo
 url: https://teamtomo.org
 license: BSD-3-Clause
+doi: 10.5281/zenodo.18405652
 identifiers:
   - type: doi
     value: 10.5281/zenodo.18405652
