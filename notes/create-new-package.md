@@ -36,7 +36,7 @@ cp -r packages/skel/ packages/primitives/my_new_package
 
 ### Editing the source directory name
 
-The workspace layout requires the src directory match the name of the package. Following the same example as above, change the name of `src/your_package_name/` to `src/my_new_package/`.
+The workspace layout requires the src directory to match the name of the package. Following the same example as above, change the name of `src/your_package_name/` to `src/my_new_package/`.
 
 ```bash
 cd packages/primitives/my_new_package
