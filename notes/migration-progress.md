@@ -10,36 +10,42 @@ _Note: File i/o packages remain separate from the monorepo_
 
 ### Primitives packages migration
 
-- [x] `torch-fourier-slice`             - extracting/inserting central slices of Fourier transforms
-- [x] `torch-fourier-rescale`           - rescale by padding/cropping Fourier transforms
-- [x] `torch-fourier-shift`             - subpixel shift by phase shifting Fourier transforms
-- [x] `torch-ctf`                       - Contrast Transfer Function utilities
-- [x] `torch-fourier-filter`            - Fourier space filters
-- [x] `torch-fourier-shell-correlation` - correlation as a function of spatial frequency
-- [x] `torch-image-interpolation`       - sample values from or insert values into images
-- [x] `torch-transform-image`           - affine transforms of images
-- [x] `torch-cubic-spline-grids`        - continuous parametrisations of 1-4D spaces
-- [x] `torch-subpixel-crop`             - crop from images with subpixel precision
-- [x] `torch-find-peaks`                - find and refine peaks in images
-- [x] `torch-grid-utils`                - coordinate grids, frequency grids and shape generation
-- [x] `torch-so3`                       - 3D rotation operations and utilities
 - [x] `torch-affine-utils`              - affine matrix generation for 2D/3D coordinates
-- [x] `torch-tomogram`                  - tomogram data interface (renamed to torch-tilt-series during migration)
+- [x] `torch-cubic-spline-grids`        - continuous parametrisations of 1-4D spaces
+- [x] `torch-ctf`                       - Contrast Transfer Function utilities
+- [x] `torch-find-peaks`                - find and refine peaks in images
+- [x] `torch-fourier-filter`            - Fourier space filters
+- [x] `torch-fourier-rescale`           - rescale by padding/cropping Fourier transforms
+- [x] `torch-fourier-shell-correlation` - correlation as a function of spatial frequency
+- [x] `torch-fourier-shift`             - subpixel shift by phase shifting Fourier transforms
+- [x] `torch-fourier-slice`             - extracting/inserting central slices of Fourier transforms
+- [x] `torch-grid-utils`                - coordinate grids, frequency grids and shape generation
+- [x] `torch-image-interpolation`       - sample values from or insert values into images
+- [x] `torch-so3`                       - 3D rotation operations and utilities
+- [x] `torch-transform-image`           - affine transforms of images
+- [x] `torch-subpixel-crop`             - crop from images with subpixel precision
+- [ ] `torch-tomogram`                  - tomogram data interface (renamed to torch-tilt-series during migration)
 
 ### Algorithms packages migration
 
 - [ ] `torch-2dtm`                        - 2D template matching in cryo-EM images
-- [ ] `torch-tiltxcorr`                   - coarse tilt series alignment for cryo-ET tilt series
-- [ ] `torch-refine-tilt-axis-angle`      - tilt axis angle refinement for cryo-ET tilt series
+- [ ] `torch-ctf-estimation`              - estimate local defocus in cryo-EM images
 - [ ] `torch-cryoeraser`                  - erase regions in cryo-EM images
+- [ ] `torch-motion-correction`           - correct local motion in cryo-EM images
+- [ ] `torch-refine-tilt-axis-angle`      - tilt axis angle refinement for cryo-ET tilt series
 - [ ] `torch-segment-fiducials-2d`        - segment gold fiducials in cryo-EM images
 - [ ] `torch-segment-tomogram-boundaries` - detect boundaries of cryo-ET volumes
-- [ ] `torch-motion-correction`           - correct local motion in cryo-EM images
-- [ ] `torch-ctf-estimation`              - estimate local defocus in cryo-EM images
+- [ ] `torch-tiltxcorr`                   - coarse tilt series alignment for cryo-ET tilt series
 
 ### Util packages migration
 
 - [ ] `teamtomo-basemodel` - Helpful Pydantic wrapper for parsing, validation, and serialization reuse.
+
+### Work in progress packages
+
+- [ ] `torch-tilt-series` - renamed from torch-tomogram during migration, interface for tilt series data
+- [ ] `torch-calculate-electrostatic-potential` - calculate electrostatic potential from atomic coordinates
+- [ ] `torch-structure-manipulation` - manipulate atomic structures (e.g. rotation, translation, cropping, etc.)
 
 ## Archiving old repositories
 
