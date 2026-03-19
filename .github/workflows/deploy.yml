@@ -94,7 +94,7 @@ jobs:
 
       - name: Install package dependencies
         run: |
-          uv sync --package ${{ steps.info.outputs.pkg_name }} --extras test
+          uv sync --package ${{ steps.info.outputs.pkg_name }} --group test
 
       - name: Find package directory
         id: pkg-dir
