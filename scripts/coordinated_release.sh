@@ -7,10 +7,10 @@ if [[ $# -ne 1 ]]; then
   exit 1
 fi
 
-# Check that version matches expected format (vX.Y.Z)
+# Check that version matches expected format (vX.Y.Z with optional metadata suffix)
 VERSION="$1"
-if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "ERROR: version must match vX.Y.Z (e.g., v1.2.3)" >&2
+if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([A-Za-z0-9._-]+)?$ ]]; then
+  echo "ERROR: version must match vX.Y.Z with optional suffix (e.g., v1.2.3, v1.2.3rc1, v1.2.3-beta)" >&2
   exit 1
 fi
 
@@ -84,7 +84,7 @@ if [[ ! $REPLY =~ ^[Yy]$ ]]; then
   exit 1
 fi
 
-# # Push all tags
-# git push origin --tags
+# Push all tags
+git push origin --tags
 
 echo "OK: Coordinated release tags created and pushed"
