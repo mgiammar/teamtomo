@@ -1,14 +1,21 @@
 #!/bin/bash
 set -eou pipefail
 
-# Check only one argument (version number) provided
-if [[ $# -ne 1 ]]; then
-    echo "Usage: $0 vX.Y.Z" >&2
+# Check that at least one argument (version number) provided
+if [[ $# -lt 1 ]]; then
+    echo "Usage: $0 vX.Y.Z [--prerelease]" >&2
     exit 1
 fi
 
-# Check that version matches expected format (vX.Y.Z with optional metadata suffix)
 VERSION="$1"
+PRERELEASE_FLAG=""
+
+# Check for optional --prerelease flag
+if [[ $# -gt 1 ]] && [[ "$2" == "--prerelease" ]]; then
+    PRERELEASE_FLAG="--prerelease"
+fi
+
+# Check that version matches expected format (vX.Y.Z with optional metadata suffix)
 if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([A-Za-z0-9._-]+)?$ ]]; then
     echo "ERROR: version must match vX.Y.Z with optional suffix (e.g., v1.2.3, v1.2.3rc1, v1.2.3-beta)" >&2
     exit 1
@@ -87,4 +94,14 @@ fi
 # Push all tags
 git push upstream main --follow-tags
 
-echo "OK: Coordinated release tags created and pushed"
+# Create GitHub releases for each tag
+echo "Creating GitHub releases..."
+for tag in "${TAGS[@]}"; do
+    echo "Creating release for $tag"
+    gh release create "$tag" \
+        --title "$tag" \
+        --notes "Release $tag" \
+        $PRERELEASE_FLAG
+done
+
+echo "OK: Coordinated release tags created, pushed, and releases created"
