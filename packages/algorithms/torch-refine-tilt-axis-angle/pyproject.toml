@@ -28,7 +28,7 @@ name = "torch-refine-tilt-axis-angle"
 dynamic = ["version"]
 description = "Tilt-axis angle optimization for tilt series using common lines in PyTorch"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Marten Chaillet", email = "martenchaillet@gmail.com" }]
 # https://pypi.org/classifiers/
@@ -36,10 +36,10 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
 # add your package dependencies here
@@ -54,11 +54,12 @@ dependencies = [
 
 # https://peps.python.org/pep-0621/#dependencies-optional-dependencies
 # "extras" (e.g. for `pip install .[test]`)
-[project.optional-dependencies]
+[dependency-groups]
 # add dependencies used for testing here
 test = ["pytest", "pytest-cov"]
 # add anything else you like to have in your dev environment here
 dev = [
+    { include-group = "test" },
     "ipython",
     "mypy",
     "pdbpp",  # https://github.com/pdbpp/pdbpp

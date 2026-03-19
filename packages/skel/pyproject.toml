@@ -33,7 +33,7 @@ name = "your-package-name"
 dynamic = ["version"]
 description = "[[ UPDATE ]] A short description of your package"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
 authors = [{ name = "Your Name", email = "your@email.com" }]
 # https://pypi.org/classifiers/
@@ -41,9 +41,10 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
 # Add your package dependencies here
@@ -61,7 +62,7 @@ dev = [
     "ipython",
     "mypy",
     "pdbpp",                    # https://github.com/pdbpp/pdbpp
-    "pre-commit-uv",
+    "pre-commit",
     "rich",                     # https://github.com/Textualize/rich
     "ruff",
 ]

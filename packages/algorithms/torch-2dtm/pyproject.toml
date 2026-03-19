@@ -29,22 +29,22 @@ name = "torch-2dtm"
 dynamic = ["version"]
 description = "2D template matching in pytorch"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "BSD-3-Clause" }
 authors = [
     { name = "Josh Dickerson", email = "jdickerson@berkeley.edu" },
     { name = "Matthew Giammar", email = "matthew_giammar@berkeley.edu" },
-    { name = "Alister Burt", email = "alisterburt@gmail.com" }
+    { name = "Alister Burt", email = "alisterburt@gmail.com" },
 ]
 # https://pypi.org/classifiers/
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: BSD License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
     "Typing :: Typed",
 ]
 # add your package dependencies here
@@ -52,20 +52,21 @@ dependencies = [
     "torch",
     "einops",
     "torch-fourier-slice",
-    "setuptools",  # needed for torch compilation? lol
+    "setuptools",          # needed for torch compilation? lol
 ]
 
 
 # https://peps.python.org/pep-0621/#dependencies-optional-dependencies
 # "extras" (e.g. for `pip install .[test]`)
-[project.optional-dependencies]
+[dependency-groups]
 # add dependencies used for testing here
 test = ["pytest", "pytest-cov", "scipy"]
 # add anything else you like to have in your dev environment here
 dev = [
+    { include-group = "test" },
     "ipython",
-    "pdbpp",  # https://github.com/pdbpp/pdbpp
-    "rich",  # https://github.com/Textualize/rich
+    "pdbpp",                    # https://github.com/pdbpp/pdbpp
+    "rich",                     # https://github.com/Textualize/rich
 ]
 
 [project.urls]
@@ -80,7 +81,6 @@ repository = "https://github.com/teamtomo/teamtomo"
 
 # [project.entry-points."some.group"]
 # tomatoes = "torch_2dtm:main_tomatoes"
-
 
 
 # https://docs.pytest.org/
@@ -109,8 +109,4 @@ source = ["torch_2dtm"]
 # add files that you want check-manifest to explicitly ignore here
 # (files that are in the repo but shouldn't go in the package)
 [tool.check-manifest]
-ignore = [
-    ".pre-commit-config.yaml",
-    ".ruff_cache/**/*",
-    "tests/**/*",
-]
+ignore = [".pre-commit-config.yaml", ".ruff_cache/**/*", "tests/**/*"]
