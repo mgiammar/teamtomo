@@ -22,8 +22,8 @@ def estimate_global_motion(
     image: torch.Tensor,  # (t, h, w)
     pixel_spacing: float,  # angstroms
     reference_frame: int | None = None,
-    fourier_filter: FourierFilterConfig = None,
-    device: torch.device = None,
+    fourier_filter: FourierFilterConfig | None = None,
+    device: torch.device | None = None,
 ) -> DeformationField:
     """Estimate motion using cross-correlation for the whole image.
 
@@ -122,10 +122,10 @@ def estimate_motion_cross_correlation_patches(
     patch_sampling: PatchSamplingConfig,
     reference_frame: int | None = None,
     reference_strategy: str = "mean_except_current",
-    fourier_filter: FourierFilterConfig = None,
-    refinement: XCRefinementConfig = None,
+    fourier_filter: FourierFilterConfig | None = None,
+    refinement: XCRefinementConfig | None = None,
     initial_deformation_field: DeformationField | None = None,
-    device: torch.device = None,
+    device: torch.device | None = None,
 ) -> tuple[DeformationField, torch.Tensor]:
     """Estimate motion using cross-correlation for the patches.
 
@@ -352,16 +352,24 @@ def estimate_motion_cross_correlation_patches(
         deformation_field_tensor = _apply_temporal_smoothing(
             deformation_field_tensor, smoothing_window_size, device
         )
+        def_min_y = deformation_field_tensor[0].min()
+        def_max_y = deformation_field_tensor[0].max()
+        def_min_x = deformation_field_tensor[1].min()
+        def_max_x = deformation_field_tensor[1].max()
         print(
             f"After temporal smoothing - range: "
-            f"y=[{deformation_field_tensor[0].min():.1f}, {deformation_field_tensor[0].max():.1f}], "
-            f"x=[{deformation_field_tensor[1].min():.1f}, {deformation_field_tensor[1].max():.1f}]"
+            f"y=[{def_min_y:.1f}, {def_max_y:.1f}], "
+            f"x=[{def_min_x:.1f}, {def_max_x:.1f}]"
         )
 
+    def_min_y = deformation_field_tensor[0].min()
+    def_max_y = deformation_field_tensor[0].max()
+    def_min_x = deformation_field_tensor[1].min()
+    def_max_x = deformation_field_tensor[1].max()
     print(
         f"Estimated deformation field range: "
-        f"y=[{deformation_field_tensor[0].min():.1f}, {deformation_field_tensor[0].max():.1f}], "
-        f"x=[{deformation_field_tensor[1].min():.1f}, {deformation_field_tensor[1].max():.1f}]"
+        f"y=[{def_min_y:.1f}, {def_max_y:.1f}], "
+        f"x=[{def_min_x:.1f}, {def_max_x:.1f}]"
     )
 
     print(f"Estimated deformation field shape: {deformation_field_tensor.shape}")

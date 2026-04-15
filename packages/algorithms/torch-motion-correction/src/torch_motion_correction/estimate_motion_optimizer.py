@@ -28,9 +28,9 @@ def estimate_local_motion(
     deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
     patch_sampling: PatchSamplingConfig,
     initial_deformation_field: DeformationField | None = None,
-    fourier_filter: FourierFilterConfig = None,
-    optimization: OptimizationConfig = None,
-    device: torch.device = None,
+    fourier_filter: FourierFilterConfig | None = None,
+    optimization: OptimizationConfig | None = None,
+    device: torch.device | None = None,
     return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
 ) -> DeformationField | tuple[DeformationField, OptimizationTracker]:
@@ -51,13 +51,13 @@ def estimate_local_motion(
         Patch extraction configuration, including patch shape and overlap fraction.
     initial_deformation_field: DeformationField | None
         Initial deformation field to start from. If None, initializes to zero shifts.
-    fourier_filter: FourierFilterConfig, optional
+    fourier_filter: FourierFilterConfig | None
         Fourier-space filtering parameters (b_factor and frequency_range).
         Defaults to ``FourierFilterConfig()`` when None.
-    optimization: OptimizationConfig, optional
+    optimization: OptimizationConfig | None
         Optimization hyper-parameters (n_iterations, optimizer, loss, grid type).
         Defaults to ``OptimizationConfig()`` when None.
-    device: torch.device, optional
+    device: torch.device | None
         Device to perform computation on. If None, uses the device of the input image.
     return_trajectory: bool
         Whether to return the optimization trajectory. Default is False. If true, a
