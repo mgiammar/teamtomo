@@ -7,9 +7,7 @@ import torch
 import torch.utils.checkpoint as checkpoint
 import tqdm
 from torch_cubic_spline_grids import CubicBSplineGrid3d, CubicCatmullRomGrid3d
-from torch_fourier_filter.envelopes import b_envelope
 from torch_fourier_shift import fourier_shift_dft_2d
-from torch_grid_utils import circle
 
 from torch_motion_correction.optimization_state import OptimizationTracker
 from torch_motion_correction.types import (
@@ -18,7 +16,7 @@ from torch_motion_correction.types import (
     OptimizationConfig,
     PatchSamplingConfig,
 )
-from torch_motion_correction.utils import normalize_image, prepare_bandpass_filter
+from torch_motion_correction.utils import normalize_image, prepare_patch_filters
 
 
 def estimate_local_motion(
@@ -33,8 +31,7 @@ def estimate_local_motion(
     return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
 ) -> DeformationField | tuple[DeformationField, OptimizationTracker]:
-    """
-    Estimate local motion using a gradient-based deformation field optimization.
+    """Estimate local motion using a gradient-based deformation field optimization.
 
     Parameters
     ----------
@@ -80,8 +77,8 @@ def estimate_local_motion(
     # Deconstruct config objects
     patch_shape = patch_sampling.patch_shape
     ph, pw = patch_shape
-    b_factor = fourier_filter.b_factor
-    frequency_range = fourier_filter.frequency_range
+    # b_factor = fourier_filter.b_factor
+    # frequency_range = fourier_filter.frequency_range
     n_iterations = optimization.n_iterations
     optimizer_type = optimization.optimizer_type
     loss_type = optimization.loss_type
@@ -105,61 +102,19 @@ def estimate_local_motion(
     # Create the patch grid via PatchSamplingConfig
     image_patch_iterator = patch_sampling.get_patch_iterator(image=image, device=device)
 
-    if grid_type == "catmull_rom":
-        new_deformation_field = CubicCatmullRomGrid3d(
-            resolution=deformation_field_resolution, n_channels=2
-        ).to(device)
-    elif grid_type == "bspline":
-        new_deformation_field = CubicBSplineGrid3d(
-            resolution=deformation_field_resolution, n_channels=2
-        ).to(device)
-    else:
-        raise ValueError(
-            f"Invalid grid type: {grid_type}. Must be 'catmull_rom' or 'bspline'."
-        )
-
-    if initial_deformation_field is None:
-        deformation_field_data = torch.zeros(
-            size=(2, *deformation_field_resolution), device=device
-        )
-    else:
-        deformation_field_data = initial_deformation_field.resample(
-            deformation_field_resolution
-        ).data
-        deformation_field_data -= torch.mean(deformation_field_data)
-
-    if grid_type == "catmull_rom":
-        deformation_field = CubicCatmullRomGrid3d.from_grid_data(
-            deformation_field_data
-        ).to(device)
-    elif grid_type == "bspline":
-        deformation_field = CubicBSplineGrid3d.from_grid_data(
-            deformation_field_data
-        ).to(device)
+    new_deformation_field, deformation_field = _initialize_deformation_grids(
+        resolution=deformation_field_resolution,
+        initial_deformation_field=initial_deformation_field,
+        grid_type=grid_type,
+        device=device,
+    )
 
     # Reusable masks and Fourier filters
-    # NOTE: This is assuming square patches... revisit if needed
-    circle_mask = circle(
-        radius=patch_shape[1] / 4,
-        image_shape=patch_shape,
-        smoothing_radius=patch_shape[1] / 4,
-        device=device,
-    )
-
-    b_factor_envelope = b_envelope(
-        B=b_factor,
-        image_shape=patch_shape,
-        pixel_size=pixel_spacing,
-        rfft=True,
-        fftshift=False,
-        device=device,
-    )
-
-    bandpass_filter = prepare_bandpass_filter(
-        frequency_range=frequency_range,
-        patch_shape=patch_shape,
+    circle_mask, b_factor_envelope, bandpass_filter = prepare_patch_filters(
+        shape=patch_shape,
         pixel_spacing=pixel_spacing,
-        refinement_fraction=1.0,  # Not used in this context
+        fourier_filter=fourier_filter,
+        mask_smoothing_fraction=1.0,  # optimizer historically uses radius == smoothing
         device=device,
     )
 
@@ -412,6 +367,56 @@ def estimate_local_motion(
         return result, trajectory
     else:
         return result
+
+
+def _initialize_deformation_grids(
+    resolution: tuple[int, int, int],
+    initial_deformation_field: DeformationField | None,
+    grid_type: str,
+    device: torch.device,
+) -> tuple[
+    CubicCatmullRomGrid3d | CubicBSplineGrid3d,
+    CubicCatmullRomGrid3d | CubicBSplineGrid3d,
+]:
+    """Create the new (optimizable) and base (frozen) cubic spline grids.
+
+    Parameters
+    ----------
+    resolution : tuple[int, int, int]
+        (nt, nh, nw) control-point resolution for both grids.
+    initial_deformation_field : DeformationField | None
+        Existing field to use as the frozen base.  When None the base grid
+        starts at zero shifts.
+    grid_type : str
+        "catmull_rom" or "bspline".
+    device : torch.device
+        Device to place both grids on.
+
+    Returns
+    -------
+    new_grid : CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Zero-initialised, optimisable grid.
+    base_grid : CubicCatmullRomGrid3d | CubicBSplineGrid3d
+        Frozen grid holding the initial (resampled) shifts.
+    """
+    if grid_type not in ["catmull_rom", "bspline"]:
+        raise ValueError(
+            f"Invalid grid type: {grid_type!r}. Must be 'catmull_rom' or 'bspline'."
+        )
+
+    grid_class = CubicBSplineGrid3d if grid_type == "bspline" else CubicCatmullRomGrid3d
+
+    new_grid = grid_class(resolution=resolution, n_channels=2).to(device)
+
+    if initial_deformation_field is None:
+        base_data = torch.zeros(size=(2, *resolution), device=device)
+    else:
+        base_data = initial_deformation_field.resample(resolution).data.to(device)
+        base_data -= torch.mean(base_data)
+
+    base_grid = grid_class.from_grid_data(base_data).to(device)
+
+    return new_grid, base_grid
 
 
 def _compute_shifted_patches_and_shifts(

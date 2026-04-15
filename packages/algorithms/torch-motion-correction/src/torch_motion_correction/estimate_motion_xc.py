@@ -3,8 +3,6 @@
 import einops
 import torch
 from scipy.signal import savgol_filter
-from torch_fourier_filter.envelopes import b_envelope
-from torch_grid_utils import circle
 
 from torch_motion_correction.correct_motion import correct_motion, correct_motion_fast
 from torch_motion_correction.deformation_field_utils import (
@@ -17,10 +15,7 @@ from torch_motion_correction.types import (
     PatchSamplingConfig,
     XCRefinementConfig,
 )
-from torch_motion_correction.utils import (
-    normalize_image,
-    prepare_bandpass_filter,
-)
+from torch_motion_correction.utils import normalize_image, prepare_patch_filters
 
 
 def estimate_global_motion(
@@ -54,8 +49,8 @@ def estimate_global_motion(
     if fourier_filter is None:
         fourier_filter = FourierFilterConfig()
 
-    b_factor = fourier_filter.b_factor
-    frequency_range = fourier_filter.frequency_range
+    # b_factor = fourier_filter.b_factor
+    # frequency_range = fourier_filter.frequency_range
 
     if device is None:
         device = image.device
@@ -73,36 +68,15 @@ def estimate_global_motion(
     # Normalize image
     image = normalize_image(image)
 
-    # Apply circular mask to reduce edge artifacts
-    mask = circle(
-        radius=min(h, w) / 4,
-        image_shape=(h, w),
-        smoothing_radius=min(h, w) / 8,
-        device=device,
-    )
-
-    # Apply mask and FFT
-    masked_images = image * mask
-    fft_images = torch.fft.rfftn(masked_images, dim=(-2, -1))
-
-    # Prepare filters
-    b_factor_envelope = b_envelope(
-        B=b_factor,
-        image_shape=(h, w),
-        pixel_size=pixel_spacing,
-        rfft=True,
-        fftshift=False,
-        device=device,
-    )
-
-    bandpass = prepare_bandpass_filter(
-        frequency_range=frequency_range,
-        patch_shape=(h, w),
+    mask, b_factor_envelope, bandpass = prepare_patch_filters(
+        shape=(h, w),
         pixel_spacing=pixel_spacing,
+        fourier_filter=fourier_filter,
         device=device,
     )
 
-    # Apply filters
+    # Apply mask, FFT, and filters to all frames at once
+    fft_images = torch.fft.rfftn(image * mask, dim=(-2, -1))
     filtered_fft = fft_images * bandpass * b_factor_envelope
 
     # Reference frame
@@ -198,8 +172,8 @@ def estimate_motion_cross_correlation_patches(
         refinement = XCRefinementConfig()
 
     # Deconstruct config objects
-    b_factor = fourier_filter.b_factor
-    frequency_range = fourier_filter.frequency_range
+    # b_factor = fourier_filter.b_factor
+    # frequency_range = fourier_filter.frequency_range
     ph, pw = patch_sampling.patch_shape
     step_h, step_w = patch_sampling.patch_step
     sub_pixel_refinement = refinement.sub_pixel_refinement
@@ -261,23 +235,10 @@ def estimate_motion_cross_correlation_patches(
     print(f"Number of patches per frame: {gh * gw}")
 
     # Prepare filters (only need to do this once)
-    mask = circle(
-        radius=pw / 4, image_shape=(ph, pw), smoothing_radius=pw / 8, device=device
-    )
-
-    b_factor_envelope = b_envelope(
-        B=b_factor,
-        image_shape=(ph, pw),
-        pixel_size=pixel_spacing,
-        rfft=True,
-        fftshift=False,
-        device=device,
-    )
-
-    bandpass = prepare_bandpass_filter(
-        frequency_range=frequency_range,
-        patch_shape=(ph, pw),
+    mask, b_factor_envelope, bandpass = prepare_patch_filters(
+        shape=(ph, pw),
         pixel_spacing=pixel_spacing,
+        fourier_filter=fourier_filter,
         device=device,
     )
 
