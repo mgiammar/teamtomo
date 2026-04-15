@@ -8,6 +8,13 @@ from torch_motion_correction.estimate_motion_xc import (
     estimate_global_motion,
     estimate_motion_cross_correlation_patches,
 )
+from torch_motion_correction.types import (
+    DeformationField,
+    FourierFilterConfig,
+    OptimizationConfig,
+    PatchSamplingConfig,
+    XCRefinementConfig,
+)
 
 
 @pytest.fixture
@@ -44,57 +51,56 @@ class TestEstimateGlobalMotion:
 
     def test_basic_functionality(self, sample_image, pixel_spacing):
         """Test basic motion estimation."""
-        deformation_field = estimate_global_motion(
+        result = estimate_global_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             device=torch.device("cpu"),
         )
+        assert isinstance(result, DeformationField)
         # Check output shape: (2, t, 1, 1) for global motion
-        assert deformation_field.shape == (2, sample_image.shape[0], 1, 1)
-        # Check that it's a tensor
-        assert isinstance(deformation_field, torch.Tensor)
+        assert result.shape == (2, sample_image.shape[0], 1, 1)
 
     def test_reference_frame(self, sample_image, pixel_spacing):
         """Test that reference frame parameter works."""
-        deformation_field = estimate_global_motion(
+        result = estimate_global_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             reference_frame=0,
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 1, 1)
+        assert result.shape == (2, sample_image.shape[0], 1, 1)
 
     def test_different_devices(self, sample_image, pixel_spacing):
         """Test that device parameter works."""
         if torch.cuda.is_available():
-            deformation_field = estimate_global_motion(
+            result = estimate_global_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
                 device=torch.device("cuda"),
             )
-            assert deformation_field.device.type == "cuda"
+            assert result.device.type == "cuda"
         else:
             pytest.skip("CUDA not available")
 
-    def test_b_factor_parameter(self, sample_image, pixel_spacing):
-        """Test that b_factor parameter works."""
-        deformation_field = estimate_global_motion(
+    def test_fourier_filter_b_factor(self, sample_image, pixel_spacing):
+        """Test that FourierFilterConfig b_factor works."""
+        result = estimate_global_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            b_factor=1000,
+            fourier_filter=FourierFilterConfig(b_factor=1000),
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 1, 1)
+        assert result.shape == (2, sample_image.shape[0], 1, 1)
 
-    def test_frequency_range_parameter(self, sample_image, pixel_spacing):
-        """Test that frequency_range parameter works."""
-        deformation_field = estimate_global_motion(
+    def test_fourier_filter_frequency_range(self, sample_image, pixel_spacing):
+        """Test that FourierFilterConfig frequency_range works."""
+        result = estimate_global_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            frequency_range=(200, 20),
+            fourier_filter=FourierFilterConfig(frequency_range=(200, 20)),
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 1, 1)
+        assert result.shape == (2, sample_image.shape[0], 1, 1)
 
 
 class TestEstimateMotionCrossCorrelationPatches:
@@ -102,96 +108,115 @@ class TestEstimateMotionCrossCorrelationPatches:
 
     def test_basic_functionality(self, sample_image, pixel_spacing):
         """Test basic patch-based motion estimation."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
             device=torch.device("cpu"),
         )
-        # Check output shapes
-        assert len(deformation_field.shape) == 4  # (2, t, gh, gw)
-        assert deformation_field.shape[0] == 2  # y, x
-        assert deformation_field.shape[1] == sample_image.shape[0]  # t
+        assert isinstance(result, DeformationField)
+        assert len(result.shape) == 4  # (2, t, gh, gw)
+        assert result.shape[0] == 2  # y, x
+        assert result.shape[1] == sample_image.shape[0]  # t
         assert len(patch_positions.shape) == 4  # (t, gh, gw, 3)
         assert patch_positions.shape[0] == sample_image.shape[0]  # t
-        assert patch_positions is not None
 
     def test_reference_strategy_middle_frame(self, sample_image, pixel_spacing):
         """Test middle_frame reference strategy."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
             reference_strategy="middle_frame",
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
 
     def test_reference_strategy_mean_except_current(self, sample_image, pixel_spacing):
         """Test mean_except_current reference strategy."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
             reference_strategy="mean_except_current",
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
 
-    def test_sub_pixel_refinement(self, sample_image, pixel_spacing):
-        """Test sub-pixel refinement option."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+    def test_xc_refinement_sub_pixel(self, sample_image, pixel_spacing):
+        """Test XCRefinementConfig sub_pixel_refinement option."""
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
-            sub_pixel_refinement=True,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            refinement=XCRefinementConfig(sub_pixel_refinement=True),
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
 
-    def test_temporal_smoothing(self, sample_image, pixel_spacing):
-        """Test temporal smoothing option."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+    def test_xc_refinement_temporal_smoothing(self, sample_image, pixel_spacing):
+        """Test XCRefinementConfig temporal smoothing option."""
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
-            temporal_smoothing=True,
-            smoothing_window_size=3,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            refinement=XCRefinementConfig(
+                temporal_smoothing=True, smoothing_window_size=3
+            ),
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
 
-    def test_outlier_rejection(self, sample_image, pixel_spacing):
-        """Test outlier rejection option."""
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+    def test_xc_refinement_outlier_rejection(self, sample_image, pixel_spacing):
+        """Test XCRefinementConfig outlier rejection option."""
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
-            outlier_rejection=True,
-            outlier_threshold=2.0,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            refinement=XCRefinementConfig(
+                outlier_rejection=True, outlier_threshold=2.0
+            ),
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
 
     def test_with_initial_deformation_field(self, sample_image, pixel_spacing):
         """Test with initial deformation field."""
-        # Create a simple initial deformation field
         t = sample_image.shape[0]
-        initial_field = torch.zeros((2, t, 1, 1))
-        deformation_field, patch_positions = estimate_motion_cross_correlation_patches(
+        initial_field = DeformationField(data=torch.zeros((2, t, 1, 1)))
+        result, patch_positions = estimate_motion_cross_correlation_patches(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_sidelength=32,
-            deformation_field=initial_field,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            initial_deformation_field=initial_field,
             device=torch.device("cpu"),
         )
-        assert deformation_field.shape[0] == 2
+        assert result.shape[0] == 2
         assert patch_positions is not None
+
+    def test_patch_sampling_overlap(self, sample_image, pixel_spacing):
+        """Test that PatchSamplingConfig overlap parameter is used."""
+        # 25% overlap should give more patches than 50%
+        result_25, _ = estimate_motion_cross_correlation_patches(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32), overlap=0.25),
+            device=torch.device("cpu"),
+        )
+        result_50, _ = estimate_motion_cross_correlation_patches(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32), overlap=0.5),
+            device=torch.device("cpu"),
+        )
+        # Both should be valid DeformationFields
+        assert isinstance(result_25, DeformationField)
+        assert isinstance(result_50, DeformationField)
 
 
 class TestEstimateLocalMotion:
@@ -199,106 +224,127 @@ class TestEstimateLocalMotion:
 
     def test_basic_functionality(self, sample_image, pixel_spacing):
         """Test basic local motion estimation with minimal iterations."""
-        deformation_field = estimate_local_motion(
+        result = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_shape=(32, 32),
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
-            initial_deformation_field=None,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(n_iterations=2),
             device=torch.device("cpu"),
-            n_iterations=2,  # Minimal iterations for testing
-            optimizer_type="adam",
         )
+        assert isinstance(result, DeformationField)
         # Check output shape: (2, nt, nh, nw)
-        assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
-        assert isinstance(deformation_field, torch.Tensor)
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
 
     def test_with_initial_deformation_field(self, sample_image, pixel_spacing):
         """Test with initial deformation field."""
-        initial_field = torch.zeros((2, sample_image.shape[0], 2, 2))
-        deformation_field = estimate_local_motion(
+        initial_field = DeformationField(
+            data=torch.zeros((2, sample_image.shape[0], 2, 2))
+        )
+        result = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_shape=(32, 32),
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
             initial_deformation_field=initial_field,
+            optimization=OptimizationConfig(n_iterations=2),
             device=torch.device("cpu"),
-            n_iterations=2,
-            optimizer_type="adam",
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
 
     def test_different_optimizers(self, sample_image, pixel_spacing):
-        """Test different optimizer types."""
+        """Test different optimizer types via OptimizationConfig."""
         for optimizer_type in ["adam", "sgd"]:
-            deformation_field = estimate_local_motion(
+            result = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
-                patch_shape=(32, 32),
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
-                initial_deformation_field=None,
+                patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+                optimization=OptimizationConfig(
+                    n_iterations=2, optimizer_type=optimizer_type
+                ),
                 device=torch.device("cpu"),
-                n_iterations=2,
-                optimizer_type=optimizer_type,
             )
-            assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+            assert result.shape == (2, sample_image.shape[0], 2, 2)
 
     def test_different_grid_types(self, sample_image, pixel_spacing):
-        """Test different grid types."""
+        """Test different grid types via OptimizationConfig."""
         for grid_type in ["catmull_rom", "bspline"]:
-            deformation_field = estimate_local_motion(
+            result = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
-                patch_shape=(32, 32),
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
-                initial_deformation_field=None,
+                patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+                optimization=OptimizationConfig(n_iterations=2, grid_type=grid_type),
                 device=torch.device("cpu"),
-                n_iterations=2,
-                grid_type=grid_type,
             )
-            assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+            assert result.shape == (2, sample_image.shape[0], 2, 2)
+            assert result.grid_type == grid_type
 
     def test_different_loss_types(self, sample_image, pixel_spacing):
-        """Test different loss types."""
+        """Test different loss types via OptimizationConfig."""
         for loss_type in ["mse", "ncc"]:
-            deformation_field = estimate_local_motion(
+            result = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
-                patch_shape=(32, 32),
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
-                initial_deformation_field=None,
+                patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+                optimization=OptimizationConfig(n_iterations=2, loss_type=loss_type),
                 device=torch.device("cpu"),
-                n_iterations=2,
-                loss_type=loss_type,
             )
-            assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+            assert result.shape == (2, sample_image.shape[0], 2, 2)
 
     def test_return_trajectory(self, sample_image, pixel_spacing):
         """Test return_trajectory option."""
-        deformation_field, trajectory = estimate_local_motion(
+        result, trajectory = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_shape=(32, 32),
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
-            initial_deformation_field=None,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(n_iterations=2),
             device=torch.device("cpu"),
-            n_iterations=2,
             return_trajectory=True,
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
         assert trajectory is not None
 
     def test_optimizer_kwargs(self, sample_image, pixel_spacing):
-        """Test custom optimizer kwargs."""
-        deformation_field = estimate_local_motion(
+        """Test custom optimizer kwargs via OptimizationConfig."""
+        result = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
-            patch_shape=(32, 32),
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
-            initial_deformation_field=None,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(
+                n_iterations=2,
+                optimizer_type="adam",
+                optimizer_kwargs={"lr": 0.001},
+            ),
             device=torch.device("cpu"),
-            n_iterations=2,
-            optimizer_type="adam",
-            optimizer_kwargs={"lr": 0.001},
         )
-        assert deformation_field.shape == (2, sample_image.shape[0], 2, 2)
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+
+    def test_fourier_filter_config(self, sample_image, pixel_spacing):
+        """Test FourierFilterConfig is applied correctly."""
+        result = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            fourier_filter=FourierFilterConfig(b_factor=1000, frequency_range=(200, 5)),
+            optimization=OptimizationConfig(n_iterations=2),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+
+    def test_patch_sampling_overlap(self, sample_image, pixel_spacing):
+        """Test that PatchSamplingConfig overlap is applied."""
+        result = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32), overlap=0.25),
+            optimization=OptimizationConfig(n_iterations=2),
+            device=torch.device("cpu"),
+        )
+        assert isinstance(result, DeformationField)

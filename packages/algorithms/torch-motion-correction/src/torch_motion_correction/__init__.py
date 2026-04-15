@@ -28,8 +28,20 @@ from torch_motion_correction.estimate_motion_xc import (
     estimate_global_motion,
     estimate_motion_cross_correlation_patches,
 )
+from torch_motion_correction.types import (
+    DeformationField,
+    FourierFilterConfig,
+    OptimizationConfig,
+    PatchSamplingConfig,
+    XCRefinementConfig,
+)
 
 __all__ = [
+    "DeformationField",
+    "FourierFilterConfig",
+    "OptimizationConfig",
+    "PatchSamplingConfig",
+    "XCRefinementConfig",
     "correct_motion",
     "correct_motion_fast",
     "correct_motion_slow",

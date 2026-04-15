@@ -13,14 +13,14 @@ from torch_motion_correction.deformation_field_utils import (
     evaluate_deformation_field,
     evaluate_deformation_field_at_t,
 )
+from torch_motion_correction.types import DeformationField
 
 
 def correct_motion(
     image: torch.Tensor,  # (t, h, w)
-    deformation_grid: torch.Tensor,  # (yx, t, h, w)
+    deformation_field: DeformationField,
     pixel_spacing: float,
     grad: bool = False,
-    grid_type: str = "catmull_rom",
     device: torch.device = None,
 ) -> torch.Tensor:
     """Correct movie motion using a deformation field.
@@ -29,14 +29,15 @@ def correct_motion(
     ----------
     image: torch.Tensor
         (t, h, w) array of images to motion correct
-    deformation_grid: torch.Tensor
-        (yx, t, h, w) deformation grid
+    deformation_field: DeformationField
+        Spatiotemporal deformation field with shape (2, nt, nh, nw) in Angstroms.
+        The ``grid_type`` attribute of the
+        :class:`~torch_motion_correction.types.DeformationField` controls the
+        interpolation method.
     pixel_spacing: float
         Pixel spacing in Angstroms
     grad: bool
         Whether to enable gradients. Default is False.
-    grid_type: str
-        Type of grid to use ('catmull_rom' or 'bspline'). Default is 'catmull_rom'.
     device: torch.device, optional
         Device for computation. Default is None, which uses the device of the
         input image.
@@ -48,12 +49,12 @@ def correct_motion(
     """
     if device is None:
         device = image.device
-    else:
-        image = image.to(device)
-        deformation_grid = deformation_grid.to(device)
+
+    image = image.to(device)
+    deformation_field = deformation_field.to(device)
 
     t, _, _ = image.shape
-    _, _, gh, gw = deformation_grid.shape
+    _, _, gh, gw = deformation_field.data.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
 
     # Use conditional gradient context to save memory
@@ -65,10 +66,9 @@ def correct_motion(
             _correct_frame(
                 frame=frame,
                 frame_deformation_grid=evaluate_deformation_field_at_t(
-                    deformation_field=deformation_grid,
+                    deformation_field=deformation_field,
                     t=frame_t,
                     grid_shape=(10 * gh, 10 * gw),
-                    grid_type=grid_type,
                 ),
                 pixel_spacing=pixel_spacing,
             )
@@ -115,7 +115,7 @@ def _correct_frame(
         pixel_grid=pixel_grid,
     )  # (h, w, yx)
 
-    # todo: make sure semantics around deformation field interpolants
+    # TODO: make sure semantics around deformation field interpolants
     # (i.e. spatiotemporally resolved shifts) are crystal clear
     deformed_pixel_coords = pixel_grid + pixel_shifts
 
@@ -135,8 +135,7 @@ def get_pixel_shifts(
     frame_deformation_grid: torch.Tensor,
     pixel_grid: torch.Tensor,
 ) -> torch.Tensor:
-    """
-    Get pixel shifts from a deformation grid.
+    """Get pixel shifts from a deformation grid.
 
     Parameters
     ----------
@@ -187,10 +186,8 @@ def get_pixel_shifts(
 
 def correct_motion_two_grids(
     image: torch.Tensor,  # (t, h, w)
-    new_deformation_grid: CubicCatmullRomGrid3d
-    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d - optimizable with gradients
-    base_deformation_grid: CubicCatmullRomGrid3d
-    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d - frozen base grid
+    new_deformation_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d,  # optimizable
+    base_deformation_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d,  # frozen ref
     pixel_spacing: float,
     grad: bool = True,
     device: torch.device = None,
@@ -220,8 +217,8 @@ def correct_motion_two_grids(
     """
     if device is None:
         device = image.device
-    else:
-        image = image.to(device)
+
+    image = image.to(device)
 
     t, _, _ = image.shape
 
@@ -255,10 +252,8 @@ def correct_motion_two_grids(
 
 def _correct_frame_two_grids(
     frame: torch.Tensor,
-    new_grid: CubicCatmullRomGrid3d
-    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d with gradients
-    base_grid: CubicCatmullRomGrid3d
-    | CubicBSplineGrid3d,  # CubicCatmullRomGrid3d frozen
+    new_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d,  # to optimize with gradients
+    base_grid: CubicCatmullRomGrid3d | CubicBSplineGrid3d,  # frozen reference
     frame_t: float,
     grid_shape: tuple[int, int],
     pixel_spacing: float,
@@ -344,9 +339,9 @@ def correct_motion_slow(
     """
     if device is None:
         device = image.device
-    else:
-        image = image.to(device)
-        deformation_grid = deformation_grid.to(device)
+
+    image = image.to(device)
+    deformation_grid = deformation_grid.to(device)
 
     t, _, _ = image.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
@@ -455,9 +450,9 @@ def correct_motion_fast(
     """
     if device is None:
         device = image.device
-    else:
-        image = image.to(device)
-        deformation_grid = deformation_grid.to(device)
+
+    image = image.to(device)
+    deformation_grid = deformation_grid.to(device)
 
     # Check that deformation field has single patch dimensions
     if deformation_grid.shape[-2:] != (1, 1):

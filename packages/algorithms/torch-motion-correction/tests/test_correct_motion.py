@@ -10,6 +10,7 @@ from torch_motion_correction.correct_motion import (
     correct_motion_slow,
     correct_motion_two_grids,
 )
+from torch_motion_correction.types import DeformationField
 
 
 @pytest.fixture
@@ -75,7 +76,7 @@ class TestCorrectMotion:
         """Test basic motion correction."""
         corrected = correct_motion(
             image=sample_image,
-            deformation_grid=sample_deformation_field,
+            deformation_field=DeformationField(data=sample_deformation_field),
             pixel_spacing=pixel_spacing,
             device=torch.device("cpu"),
         )
@@ -89,13 +90,14 @@ class TestCorrectMotion:
         sample_deformation_field,
         pixel_spacing,
     ):
-        """Test different grid types."""
+        """Test different grid types via DeformationField."""
         for grid_type in ["catmull_rom", "bspline"]:
             corrected = correct_motion(
                 image=sample_image,
-                deformation_grid=sample_deformation_field,
+                deformation_field=DeformationField(
+                    data=sample_deformation_field, grid_type=grid_type
+                ),
                 pixel_spacing=pixel_spacing,
-                grid_type=grid_type,
                 device=torch.device("cpu"),
             )
             assert corrected.shape == sample_image.shape
@@ -104,7 +106,7 @@ class TestCorrectMotion:
         """Test grad flag."""
         corrected = correct_motion(
             image=sample_image,
-            deformation_grid=sample_deformation_field,
+            deformation_field=DeformationField(data=sample_deformation_field),
             pixel_spacing=pixel_spacing,
             grad=False,
             device=torch.device("cpu"),
@@ -120,7 +122,7 @@ class TestCorrectMotion:
         if torch.cuda.is_available():
             corrected = correct_motion(
                 image=sample_image,
-                deformation_grid=sample_deformation_field,
+                deformation_field=DeformationField(data=sample_deformation_field),
                 pixel_spacing=pixel_spacing,
                 device=torch.device("cuda"),
             )
@@ -132,10 +134,9 @@ class TestCorrectMotion:
     def test_zero_deformation_field(self, sample_image, pixel_spacing):
         """Test with zero deformation field (should return original image)."""
         t = sample_image.shape[0]
-        zero_field = torch.zeros((2, t, 2, 2))
         corrected = correct_motion(
             image=sample_image,
-            deformation_grid=zero_field,
+            deformation_field=DeformationField(data=torch.zeros((2, t, 2, 2))),
             pixel_spacing=pixel_spacing,
             device=torch.device("cpu"),
         )
@@ -259,17 +260,18 @@ class TestMotionCorrectionIntegration:
         """Test a complete workflow: estimate motion then correct."""
         from torch_motion_correction.estimate_motion_xc import estimate_global_motion
 
-        # Estimate motion
+        # Estimate motion — returns DeformationField
         deformation_field = estimate_global_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             device=torch.device("cpu"),
         )
+        assert isinstance(deformation_field, DeformationField)
 
-        # Correct motion
+        # Correct motion — accepts DeformationField directly
         corrected = correct_motion(
             image=sample_image,
-            deformation_grid=deformation_field,
+            deformation_field=deformation_field,
             pixel_spacing=pixel_spacing,
             device=torch.device("cpu"),
         )
@@ -279,7 +281,7 @@ class TestMotionCorrectionIntegration:
         assert torch.isfinite(corrected).all()
 
     def test_fast_correction_workflow(self, sample_image, pixel_spacing):
-        """Test workflow with fast correction."""
+        """Test workflow with fast correction using raw tensor from DeformationField."""
         from torch_motion_correction.estimate_motion_xc import estimate_global_motion
 
         # Estimate motion (produces single patch field)
@@ -289,10 +291,10 @@ class TestMotionCorrectionIntegration:
             device=torch.device("cpu"),
         )
 
-        # Correct motion using fast method
+        # correct_motion_fast still takes raw tensor (2, t, 1, 1)
         corrected = correct_motion_fast(
             image=sample_image,
-            deformation_grid=deformation_field,
+            deformation_grid=deformation_field.data,
             device=torch.device("cpu"),
         )
 

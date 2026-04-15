@@ -11,39 +11,30 @@ from torch_fourier_filter.envelopes import b_envelope
 from torch_fourier_shift import fourier_shift_dft_2d
 from torch_grid_utils import circle
 
-from torch_motion_correction.deformation_field_utils import (
-    resample_deformation_field,
-)
 from torch_motion_correction.optimization_state import OptimizationTracker
-from torch_motion_correction.patch_grid import (
-    patch_grid_centers,
+from torch_motion_correction.types import (
+    DeformationField,
+    FourierFilterConfig,
+    OptimizationConfig,
+    PatchSamplingConfig,
 )
-from torch_motion_correction.patch_utils import ImagePatchIterator
-from torch_motion_correction.utils import (
-    normalize_image,
-    prepare_bandpass_filter,
-)
+from torch_motion_correction.utils import normalize_image, prepare_bandpass_filter
 
 
 def estimate_local_motion(
     image: torch.Tensor,  # (t, H, W)
     pixel_spacing: float,  # Angstroms
-    patch_shape: tuple[int, int],  # (ph, pw)
     deformation_field_resolution: tuple[int, int, int],  # (nt, nh, nw)
-    initial_deformation_field: torch.Tensor | None,  # (yx, nt, nh, nw)
+    patch_sampling: PatchSamplingConfig,
+    initial_deformation_field: DeformationField | None = None,
+    fourier_filter: FourierFilterConfig = None,
+    optimization: OptimizationConfig = None,
     device: torch.device = None,
-    n_iterations: int = 100,
-    b_factor: float = 500,
-    frequency_range: tuple[float, float] = (300, 10),  # angstroms
-    optimizer_type: str = "adam",
-    grid_type: str = "catmull_rom",
-    loss_type: str = "mse",
-    optimizer_kwargs: dict | None = None,
     return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
-) -> torch.Tensor | tuple[torch.Tensor, OptimizationTracker]:
+) -> DeformationField | tuple[DeformationField, OptimizationTracker]:
     """
-    Estimate motion.
+    Estimate local motion using a gradient-based deformation field optimization.
 
     Parameters
     ----------
@@ -52,51 +43,54 @@ def estimate_local_motion(
         H is the height, and W is the width.
     pixel_spacing: float
         Pixel spacing in Angstroms.
-    patch_shape: tuple[int, int]
-        Size of the patches to extract (ph, pw) in terms of pixels.
     deformation_field_resolution: tuple[int, int, int]
         Resolution of the deformation field (nt, nh, nw) where nt is the number of
         time points, nh is the number of control points in height, and nw is the
         number of control points in width.
-    initial_deformation_field: torch.Tensor | None
-        Initial deformation field to start from with shape (2, nt, nh, nw) where 2
-        corresponds to (y, x) shifts. If None, initializes to zero shifts.
+    patch_sampling: PatchSamplingConfig
+        Patch extraction configuration, including patch shape and overlap fraction.
+    initial_deformation_field: DeformationField | None
+        Initial deformation field to start from. If None, initializes to zero shifts.
+    fourier_filter: FourierFilterConfig, optional
+        Fourier-space filtering parameters (b_factor and frequency_range).
+        Defaults to ``FourierFilterConfig()`` when None.
+    optimization: OptimizationConfig, optional
+        Optimization hyper-parameters (n_iterations, optimizer, loss, grid type).
+        Defaults to ``OptimizationConfig()`` when None.
     device: torch.device, optional
         Device to perform computation on. If None, uses the device of the input image.
-    n_iterations: int
-        Number of iterations for the optimization process. Default is 100.
-    b_factor: float
-        B-factor to apply in Fourier space to downweight high frequencies.
-        Default is 500.
-    frequency_range: tuple[float, float]
-        Frequency range in Angstroms for bandpass filtering (low, high).
-        Default is (300, 10).
-    loss_type: str
-        Type of loss to use ('mse', 'cc' or 'ncc'). Default is 'mse'.
-    optimizer_type: str
-        Type of optimizer to use ('adam' or 'lbfgs'). Default is 'adam'.
-    grid_type: str
-        Type of grid to use ('catmull_rom' or 'bspline'). Default is 'catmull_rom'.
-    optimizer_kwargs: dict | None
-        Additional keyword arguments for the optimizer. If None, uses defaults.
     return_trajectory: bool
         Whether to return the optimization trajectory. Default is False. If true, a
-        second return value will be provided which is an OptimizationTrajectory object.
+        second return value will be provided which is an OptimizationTracker object.
     trajectory_kwargs: dict | None
         Additional keyword arguments for the trajectory tracking. If None, uses
         defaults.
 
     Returns
     -------
-    torch.Tensor | tuple[torch.Tensor, OptimizationTracker]
-        The estimated deformation field with shape (2, nt, nh, nw) where 2 corresponds
-        to (y, x) shifts. If `return_trajectory` is True, also returns an
-        OptimizationTrajectory object containing the optimization history.
+    DeformationField | tuple[DeformationField, OptimizationTracker]
+        The estimated deformation field. If ``return_trajectory`` is True, also
+        returns an OptimizationTracker containing the optimization history.
     """
+    if fourier_filter is None:
+        fourier_filter = FourierFilterConfig()
+    if optimization is None:
+        optimization = OptimizationConfig()
+
+    # Deconstruct config objects
+    patch_shape = patch_sampling.patch_shape
+    ph, pw = patch_shape
+    b_factor = fourier_filter.b_factor
+    frequency_range = fourier_filter.frequency_range
+    n_iterations = optimization.n_iterations
+    optimizer_type = optimization.optimizer_type
+    loss_type = optimization.loss_type
+    grid_type = optimization.grid_type
+    optimizer_kwargs = optimization.optimizer_kwargs
+
     device = device if device is not None else image.device
     image = image.to(device)
-    t, h, w = image.shape
-    ph, pw = patch_shape
+    t, _h, _w = image.shape
 
     if return_trajectory:
         trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
@@ -108,16 +102,8 @@ def estimate_local_motion(
     # Normalize image based on stats from central 50% of image
     image = normalize_image(image)
 
-    # Create the patch grid
-    patch_positions = patch_grid_centers(
-        image_shape=(t, h, w),
-        patch_shape=(1, ph, pw),
-        patch_step=(1, ph // 2, pw // 2),  # Default 50% overlap
-        distribute_patches=True,
-        device=device,
-    )  # (t, gh, gw, 3)
-
-    # gh, gw = patch_positions.shape[1:3]
+    # Create the patch grid via PatchSamplingConfig
+    image_patch_iterator = patch_sampling.get_patch_iterator(image=image, device=device)
 
     if grid_type == "catmull_rom":
         new_deformation_field = CubicCatmullRomGrid3d(
@@ -136,17 +122,11 @@ def estimate_local_motion(
         deformation_field_data = torch.zeros(
             size=(2, *deformation_field_resolution), device=device
         )
-    elif initial_deformation_field is not None:
-        deformation_field_data = resample_deformation_field(
-            deformation_field=initial_deformation_field.detach(),
-            target_resolution=(
-                deformation_field_resolution[0],
-                deformation_field_resolution[1],
-                deformation_field_resolution[2],
-            ),
-        )
+    else:
+        deformation_field_data = initial_deformation_field.resample(
+            deformation_field_resolution
+        ).data
         deformation_field_data -= torch.mean(deformation_field_data)
-        # deformation_field_data *= -1
 
     if grid_type == "catmull_rom":
         deformation_field = CubicCatmullRomGrid3d.from_grid_data(
@@ -181,13 +161,6 @@ def estimate_local_motion(
         pixel_spacing=pixel_spacing,
         refinement_fraction=1.0,  # Not used in this context
         device=device,
-    )
-
-    # Instantiate the patch iterator (mini-batch like data-loader)
-    image_patch_iterator = ImagePatchIterator(
-        image=image,
-        patch_size=patch_shape,
-        control_points=patch_positions,
     )
 
     motion_optimizer = _setup_optimizer(
@@ -429,14 +402,16 @@ def estimate_local_motion(
                 )
 
     # Return final deformation field
-    final_deformation_field = new_deformation_field.data + deformation_field.data
-    average_shift = torch.mean(final_deformation_field.data)
-    final_deformation_field = final_deformation_field.data - average_shift
+    final_data = new_deformation_field.data + deformation_field.data
+    average_shift = torch.mean(final_data)
+    final_data = final_data - average_shift
+
+    result = DeformationField(data=final_data, grid_type=grid_type)
 
     if return_trajectory:
-        return final_deformation_field, trajectory
+        return result, trajectory
     else:
-        return final_deformation_field
+        return result
 
 
 def _compute_shifted_patches_and_shifts(
