@@ -31,9 +31,8 @@ def estimate_local_motion(
     fourier_filter: FourierFilterConfig | None = None,
     optimization: OptimizationConfig | None = None,
     device: torch.device | None = None,
-    return_trajectory: bool = False,
     trajectory_kwargs: dict | None = None,
-) -> DeformationField | tuple[DeformationField, OptimizationTracker]:
+) -> tuple[DeformationField, OptimizationTracker]:
     """Estimate local motion using a gradient-based deformation field optimization.
 
     Parameters
@@ -59,18 +58,15 @@ def estimate_local_motion(
         Defaults to ``OptimizationConfig()`` when None.
     device: torch.device | None
         Device to perform computation on. If None, uses the device of the input image.
-    return_trajectory: bool
-        Whether to return the optimization trajectory. Default is False. If true, a
-        second return value will be provided which is an OptimizationTracker object.
     trajectory_kwargs: dict | None
         Additional keyword arguments for the trajectory tracking. If None, uses
         defaults.
 
     Returns
     -------
-    DeformationField | tuple[DeformationField, OptimizationTracker]
-        The estimated deformation field. If ``return_trajectory`` is True, also
-        returns an OptimizationTracker containing the optimization history.
+    tuple[DeformationField, OptimizationTracker]
+        The estimated deformation field and an OptimizationTracker containing the
+        optimization history.
     """
     if fourier_filter is None:
         fourier_filter = FourierFilterConfig()
@@ -92,12 +88,10 @@ def estimate_local_motion(
     image = image.to(device)
     t, _h, _w = image.shape
 
-    if return_trajectory:
-        trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
-        # Provide sensible defaults when not supplied
-        trajectory_kwargs.setdefault("sample_every_n_steps", 1)
-        trajectory_kwargs.setdefault("total_steps", n_iterations)
-        trajectory = OptimizationTracker(**trajectory_kwargs)
+    trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
+    trajectory_kwargs.setdefault("sample_every_n_steps", 1)
+    trajectory_kwargs.setdefault("total_steps", n_iterations)
+    trajectory = OptimizationTracker(**trajectory_kwargs)
 
     # Normalize image based on stats from central 50% of image
     image = normalize_image(image)
@@ -177,7 +171,7 @@ def estimate_local_motion(
             )
 
         pbar.set_postfix({"avg_batch_loss": f"{avg_loss:.6f}"})
-        if return_trajectory and trajectory.sample_this_step(iter_idx):
+        if trajectory.sample_this_step(iter_idx):
             trajectory.add_checkpoint(
                 deformation_field=new_deformation_field.data,
                 loss=avg_loss,
@@ -191,10 +185,7 @@ def estimate_local_motion(
 
     result = DeformationField(data=final_data, grid_type=grid_type)
 
-    if return_trajectory:
-        return result, trajectory
-    else:
-        return result
+    return result, trajectory
 
 
 def _process_patch_batch(

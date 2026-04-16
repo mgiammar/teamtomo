@@ -224,7 +224,7 @@ class TestEstimateLocalMotion:
 
     def test_basic_functionality(self, sample_image, pixel_spacing):
         """Test basic local motion estimation with minimal iterations."""
-        result = estimate_local_motion(
+        result, _ = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -241,7 +241,7 @@ class TestEstimateLocalMotion:
         initial_field = DeformationField(
             data=torch.zeros((2, sample_image.shape[0], 2, 2))
         )
-        result = estimate_local_motion(
+        result, _ = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -255,7 +255,7 @@ class TestEstimateLocalMotion:
     def test_different_optimizers(self, sample_image, pixel_spacing):
         """Test different optimizer types via OptimizationConfig."""
         for optimizer_type in ["adam", "sgd"]:
-            result = estimate_local_motion(
+            result, _ = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -270,7 +270,7 @@ class TestEstimateLocalMotion:
     def test_different_grid_types(self, sample_image, pixel_spacing):
         """Test different grid types via OptimizationConfig."""
         for grid_type in ["catmull_rom", "bspline"]:
-            result = estimate_local_motion(
+            result, _ = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -284,7 +284,7 @@ class TestEstimateLocalMotion:
     def test_different_loss_types(self, sample_image, pixel_spacing):
         """Test different loss types via OptimizationConfig."""
         for loss_type in ["mse", "ncc"]:
-            result = estimate_local_motion(
+            result, _ = estimate_local_motion(
                 image=sample_image,
                 pixel_spacing=pixel_spacing,
                 deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -294,23 +294,9 @@ class TestEstimateLocalMotion:
             )
             assert result.shape == (2, sample_image.shape[0], 2, 2)
 
-    def test_return_trajectory(self, sample_image, pixel_spacing):
-        """Test return_trajectory option."""
-        result, trajectory = estimate_local_motion(
-            image=sample_image,
-            pixel_spacing=pixel_spacing,
-            deformation_field_resolution=(sample_image.shape[0], 2, 2),
-            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
-            optimization=OptimizationConfig(n_iterations=2),
-            device=torch.device("cpu"),
-            return_trajectory=True,
-        )
-        assert result.shape == (2, sample_image.shape[0], 2, 2)
-        assert trajectory is not None
-
     def test_optimizer_kwargs(self, sample_image, pixel_spacing):
         """Test custom optimizer kwargs via OptimizationConfig."""
-        result = estimate_local_motion(
+        result, _ = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -326,7 +312,7 @@ class TestEstimateLocalMotion:
 
     def test_fourier_filter_config(self, sample_image, pixel_spacing):
         """Test FourierFilterConfig is applied correctly."""
-        result = estimate_local_motion(
+        result, _ = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
@@ -339,7 +325,7 @@ class TestEstimateLocalMotion:
 
     def test_patch_sampling_overlap(self, sample_image, pixel_spacing):
         """Test that PatchSamplingConfig overlap is applied."""
-        result = estimate_local_motion(
+        result, _ = estimate_local_motion(
             image=sample_image,
             pixel_spacing=pixel_spacing,
             deformation_field_resolution=(sample_image.shape[0], 2, 2),
