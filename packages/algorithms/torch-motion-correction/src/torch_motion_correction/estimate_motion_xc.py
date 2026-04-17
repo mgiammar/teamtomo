@@ -5,9 +5,6 @@ import torch
 from scipy.signal import savgol_filter
 
 from torch_motion_correction.correct_motion import correct_motion, correct_motion_fast
-from torch_motion_correction.deformation_field_utils import (
-    image_shifts_to_deformation_field,
-)
 from torch_motion_correction.patch_grid import patch_grid_lazy
 from torch_motion_correction.types import (
     DeformationField,
@@ -110,10 +107,9 @@ def estimate_global_motion(
         f"x=[{shifts[:, 1].min():.1f}, {shifts[:, 1].max():.1f}]"
     )
 
-    raw_field = image_shifts_to_deformation_field(
+    return DeformationField.from_frame_shifts(
         shifts=shifts, pixel_spacing=pixel_spacing, device=device
     )
-    return DeformationField(data=raw_field, grid_type="catmull_rom")
 
 
 def estimate_motion_cross_correlation_patches(

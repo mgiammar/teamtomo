@@ -9,10 +9,6 @@ from torch_grid_utils import coordinate_grid
 from torch_image_interpolation import sample_image_2d
 from torch_image_interpolation.grid_sample_utils import array_to_grid_sample
 
-from torch_motion_correction.deformation_field_utils import (
-    evaluate_deformation_field,
-    evaluate_deformation_field_at_t,
-)
 from torch_motion_correction.types import DeformationField
 
 
@@ -65,8 +61,7 @@ def correct_motion(
         corrected_frames = [
             _correct_frame(
                 frame=frame,
-                frame_deformation_grid=evaluate_deformation_field_at_t(
-                    deformation_field=deformation_field,
+                frame_deformation_grid=deformation_field.evaluate_at_t(
                     t=frame_t,
                     grid_shape=(10 * gh, 10 * gw),
                 ),
@@ -404,10 +399,7 @@ def _correct_frame_slow(
     tyx = F.pad(normalized_pixel_grid, pad=(1, 0), value=t)
 
     # evaluate interpolated shifts at every pixel
-    shifts_px = evaluate_deformation_field(
-        deformation_field=deformation_grid,
-        tyx=tyx,
-    )
+    shifts_px = DeformationField(data=deformation_grid).evaluate_at(tyx)
 
     # find pixel positions to sample image data at, accounting for deformations
     deformed_pixel_coords = pixel_grid + shifts_px

@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 
 import einops
+import pandas as pd
 import torch
 import torch.nn.functional as F
 from torch_cubic_spline_grids import CubicBSplineGrid3d, CubicCatmullRomGrid3d
@@ -152,6 +154,110 @@ class DeformationField:
         new_data = einops.rearrange(new_data, "nt nh nw tyx -> tyx nt nh nw")
 
         return DeformationField(data=new_data, grid_type=self.grid_type)
+
+    @classmethod
+    def from_frame_shifts(
+        cls,
+        shifts: torch.Tensor,
+        pixel_spacing: float,
+        device: torch.device | None = None,
+        grid_type: str = "catmull_rom",
+    ) -> DeformationField:
+        """Create a DeformationField from per-frame whole-image shifts.
+
+        Parameters
+        ----------
+        shifts : torch.Tensor
+            (t, 2) tensor of (y, x) shifts in pixels.
+        pixel_spacing : float
+            Pixel spacing in Angstroms per pixel.
+        device : torch.device, optional
+            Device for the output tensor.
+        grid_type : str
+            Interpolation type. Default is 'catmull_rom'.
+
+        Returns
+        -------
+        DeformationField
+            Deformation field with shape (2, t, 1, 1).
+        """
+        if device is not None:
+            shifts = shifts.to(device)
+        data = einops.rearrange(shifts * pixel_spacing, "t c -> c t 1 1")
+        return cls(data=data, grid_type=grid_type)
+
+    def to_csv(self, output_path: str | Path) -> None:
+        """Write the deformation field to a CSV file.
+
+        Parameters
+        ----------
+        output_path : str or Path
+            Destination CSV path. Parent directories are created if needed.
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = self.data.detach().cpu()
+        _, t, h, w = data.shape
+        t_idx, h_idx, w_idx = torch.meshgrid(
+            torch.arange(t), torch.arange(h), torch.arange(w), indexing="ij"
+        )
+        df = pd.DataFrame(
+            {
+                "t": t_idx.flatten().numpy(),
+                "h": h_idx.flatten().numpy(),
+                "w": w_idx.flatten().numpy(),
+                "y_shift": data[0].flatten().numpy(),
+                "x_shift": data[1].flatten().numpy(),
+            }
+        )
+        df.to_csv(output_path, index=False)
+
+    @classmethod
+    def from_csv(
+        cls,
+        csv_path: str | Path,
+        device: torch.device | None = None,
+        grid_type: str = "catmull_rom",
+    ) -> DeformationField:
+        """Load a DeformationField from a CSV file written by :meth:`to_csv`.
+
+        Parameters
+        ----------
+        csv_path : str or Path
+            Path to the input CSV file.
+        device : torch.device, optional
+            Device for the output tensor.
+        grid_type : str
+            Interpolation type. Default is 'catmull_rom'.
+
+        Returns
+        -------
+        DeformationField
+        """
+        df = pd.read_csv(csv_path)
+
+        unique_t = sorted(df["t"].unique())
+        unique_h = sorted(df["h"].unique())
+        unique_w = sorted(df["w"].unique())
+        t_to_idx = {v: i for i, v in enumerate(unique_t)}
+        h_to_idx = {v: i for i, v in enumerate(unique_h)}
+        w_to_idx = {v: i for i, v in enumerate(unique_w)}
+
+        t, h, w = len(unique_t), len(unique_h), len(unique_w)
+        data = torch.zeros((2, t, h, w), dtype=torch.float32)
+        t_idxs = df["t"].map(t_to_idx).to_numpy()
+        h_idxs = df["h"].map(h_to_idx).to_numpy()
+        w_idxs = df["w"].map(w_to_idx).to_numpy()
+        data[0, t_idxs, h_idxs, w_idxs] = torch.tensor(
+            df["y_shift"].to_numpy(), dtype=torch.float32
+        )
+        data[1, t_idxs, h_idxs, w_idxs] = torch.tensor(
+            df["x_shift"].to_numpy(), dtype=torch.float32
+        )
+        if device is not None:
+            data = data.to(device)
+        return cls(data=data, grid_type=grid_type)
 
 
 @dataclass
