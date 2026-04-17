@@ -29,6 +29,7 @@ from torch_motion_correction.estimate_motion_xc import (
     estimate_motion_cross_correlation_patches,
 )
 from torch_motion_correction.optimization_state import (
+    EarlyStopping,
     OptimizationState,
     OptimizationTracker,
 )
@@ -42,6 +43,7 @@ from torch_motion_correction.types import (
 
 __all__ = [
     "DeformationField",
+    "EarlyStopping",
     "FourierFilterConfig",
     "OptimizationConfig",
     "OptimizationState",
