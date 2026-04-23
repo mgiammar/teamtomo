@@ -3,8 +3,8 @@
 from dataclasses import dataclass
 
 import torch
+from torch_grid_utils.patch_grid import patch_grid_centers
 
-from torch_motion_correction.patch_grid import patch_grid_centers
 from torch_motion_correction.patch_utils import ImagePatchIterator
 
 

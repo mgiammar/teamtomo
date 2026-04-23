@@ -193,7 +193,9 @@ def estimate_local_motion(
                 step=iter_idx,
             )
 
+        # Break loop if early stopping criterion is met
         if early_stopper is not None and early_stopper.update(avg_loss):
+            pbar.write(f"Early stopping at iter {iter_idx}. avg_loss={avg_loss:.6f}")
             break
 
     # Return final deformation field
