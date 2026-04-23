@@ -14,8 +14,7 @@ def patch_grid_centers(
     distribute_patches: bool = True,
     device: torch.device = None,
 ) -> torch.Tensor:
-    """
-    Extract centers of a grid of patches from an image.
+    """Extract centers of a grid of patches from an image.
 
     Parameters
     ----------
@@ -42,11 +41,14 @@ def patch_grid_centers(
     parameters_are_valid = len(image_shape) == len(patch_shape) and len(
         image_shape
     ) == len(patch_step)
+
     if parameters_are_valid is False:
         raise ValueError(
             "image shape, patch length and patch step are not the same length."
         )
+
     ndim = len(image_shape)
+
     if ndim == 2:
         return _patch_centers_2d(
             image_shape=image_shape,
@@ -74,8 +76,7 @@ def _patch_centers_1d(
     distribute_patches: bool = True,
     device: torch.device = None,
 ) -> torch.Tensor:
-    """
-    Extract centers of a 1D grid of patches from an image.
+    """Extract centers of a 1D grid of patches from an image.
 
     Parameters
     ----------
@@ -99,15 +100,18 @@ def _patch_centers_1d(
     """
     min_bound = patch_length // 2
     max_bound = dim_length - min_bound - 1
+
     if max_bound < min_bound:
         max_bound = min_bound
     patch_centers = torch.arange(
         min_bound, max_bound + 1, step=patch_step, device=device
     )
+
     if distribute_patches is True:
         delta = max_bound - patch_centers[-1]
         shifts = torch.linspace(0, delta, steps=len(patch_centers), device=device)
         patch_centers += torch.round(shifts).long()
+
     return patch_centers
 
 
@@ -118,8 +122,7 @@ def _patch_centers_2d(
     distribute_patches: bool = True,
     device: torch.device = None,
 ) -> torch.Tensor:
-    """
-    Extract centers of a 2D grid of patches from an image.
+    """Extract centers of a 2D grid of patches from an image.
 
     Parameters
     ----------
@@ -159,6 +162,7 @@ def _patch_centers_2d(
     phh = einops.repeat(pc_h, "ph -> ph pw", pw=n_pw)
     pww = einops.repeat(pc_w, "pw -> ph pw", ph=n_ph)
     patch_centers = einops.rearrange([phh, pww], "hw h w -> h w hw")
+
     return patch_centers
 
 
@@ -169,8 +173,7 @@ def _patch_centers_3d(
     distribute_patches: bool = True,
     device: torch.device = None,
 ) -> torch.Tensor:
-    """
-    Extract centers of a 3D grid of patches from an image.
+    """Extract centers of a 3D grid of patches from an image.
 
     Parameters
     ----------
@@ -210,4 +213,5 @@ def _patch_centers_3d(
     phh = einops.repeat(pc_h, "ph -> pd ph pw", pd=n_pd, pw=n_pw)
     pww = einops.repeat(pc_w, "pw -> pd ph pw", pd=n_pd, ph=n_ph)
     patch_centers = einops.rearrange([pdd, phh, pww], "dhw d h w -> d h w dhw")
+
     return patch_centers

@@ -3,31 +3,27 @@
 import einops
 import torch
 from scipy.signal import savgol_filter
-from torch_fourier_filter.envelopes import b_envelope
-from torch_grid_utils import circle
 
 from torch_motion_correction.correct_motion import correct_motion, correct_motion_fast
-from torch_motion_correction.deformation_field_utils import (
-    image_shifts_to_deformation_field,
-    resample_deformation_field,
-)
+from torch_motion_correction.deformation_field import DeformationField
 from torch_motion_correction.patch_grid import patch_grid_lazy
-from torch_motion_correction.utils import (
-    normalize_image,
-    prepare_bandpass_filter,
+from torch_motion_correction.types import (
+    FourierFilterConfig,
+    PatchSamplingConfig,
+    XCRefinementConfig,
 )
+from torch_motion_correction.utils import normalize_image, prepare_patch_filters
 
 
 def estimate_global_motion(
     image: torch.Tensor,  # (t, h, w)
     pixel_spacing: float,  # angstroms
-    reference_frame: int | None = None,  # None for middle frame
-    b_factor: float = 500,
-    frequency_range: tuple[float, float] = (300, 10),  # angstroms
-    device: torch.device = None,
-) -> torch.Tensor:
-    """
-    Estimate motion using cross-correlation for the whole image.
+    reference_frame: int | None = None,
+    fourier_filter: FourierFilterConfig | None = None,
+    device: torch.device | None = None,
+    verbose: bool = False,
+) -> DeformationField:
+    """Estimate motion using cross-correlation for the whole image.
 
     Parameters
     ----------
@@ -37,18 +33,25 @@ def estimate_global_motion(
         Pixel spacing in angstroms
     reference_frame: int, optional
         Frame index to use as reference. If None, uses middle frame.
-    b_factor: float
-        B-factor for frequency filtering
-    frequency_range: tuple[float, float]
-        Frequency range for bandpass filtering in angstroms
+    fourier_filter: FourierFilterConfig, optional
+        Fourier-space filtering parameters. Defaults to ``FourierFilterConfig()``
+        when None.
     device: torch.device, optional
         Device for computation
+    verbose: bool
+        Whether to print progress information. Default is False.
 
     Returns
     -------
-    shifts: torch.Tensor
-        (t, 2) array of shifts for each frame in pixels (y, x)
+    DeformationField
+        Global deformation field with shape (2, t, 1, 1), one shift per frame.
     """
+    if fourier_filter is None:
+        fourier_filter = FourierFilterConfig()
+
+    # b_factor = fourier_filter.b_factor
+    # frequency_range = fourier_filter.frequency_range
+
     if device is None:
         device = image.device
     else:
@@ -60,41 +63,23 @@ def estimate_global_motion(
     if reference_frame is None:
         reference_frame = t // 2
 
-    print(f"Cross-correlation whole image: using frame {reference_frame} as reference")
+    if verbose:
+        print(
+            f"Cross-correlation whole image: using frame {reference_frame} as reference"
+        )
 
     # Normalize image
     image = normalize_image(image)
 
-    # Apply circular mask to reduce edge artifacts
-    mask = circle(
-        radius=min(h, w) / 4,
-        image_shape=(h, w),
-        smoothing_radius=min(h, w) / 8,
-        device=device,
-    )
-
-    # Apply mask and FFT
-    masked_images = image * mask
-    fft_images = torch.fft.rfftn(masked_images, dim=(-2, -1))
-
-    # Prepare filters
-    b_factor_envelope = b_envelope(
-        B=b_factor,
-        image_shape=(h, w),
-        pixel_size=pixel_spacing,
-        rfft=True,
-        fftshift=False,
-        device=device,
-    )
-
-    bandpass = prepare_bandpass_filter(
-        frequency_range=frequency_range,
-        patch_shape=(h, w),
+    mask, b_factor_envelope, bandpass = prepare_patch_filters(
+        shape=(h, w),
         pixel_spacing=pixel_spacing,
+        fourier_filter=fourier_filter,
         device=device,
     )
 
-    # Apply filters
+    # Apply mask, FFT, and filters to all frames at once
+    fft_images = torch.fft.rfftn(image * mask, dim=(-2, -1))
     filtered_fft = fft_images * bandpass * b_factor_envelope
 
     # Reference frame
@@ -122,39 +107,31 @@ def estimate_global_motion(
 
         shifts[frame_idx] = torch.tensor([shift_y, shift_x], device=device)
 
-    print(
-        f"Estimated shifts range: "
-        f"y=[{shifts[:, 0].min():.1f}, {shifts[:, 0].max():.1f}], "
-        f"x=[{shifts[:, 1].min():.1f}, {shifts[:, 1].max():.1f}]"
-    )
+    if verbose:
+        print(
+            f"Estimated shifts range: "
+            f"y=[{shifts[:, 0].min():.1f}, {shifts[:, 0].max():.1f}], "
+            f"x=[{shifts[:, 1].min():.1f}, {shifts[:, 1].max():.1f}]"
+        )
 
-    final_deformation_field = image_shifts_to_deformation_field(
+    return DeformationField.from_frame_shifts(
         shifts=shifts, pixel_spacing=pixel_spacing, device=device
     )
-
-    return final_deformation_field
 
 
 def estimate_motion_cross_correlation_patches(
     image: torch.Tensor,  # (t, h, w)
     pixel_spacing: float,  # angstroms
-    reference_frame: int | None = None,  # None for middle frame
-    reference_strategy: str = "mean_except_current",  # "middle_frame" or
-    # "mean_except_current"
-    b_factor: float = 500,
-    frequency_range: tuple[float, float] = (300, 10),  # angstroms
-    patch_sidelength: int = 1024,
-    sub_pixel_refinement: bool = True,  # Enable sub-pixel peak finding
-    temporal_smoothing: bool = True,  # Enable temporal smoothing across frames
-    smoothing_window_size: int = 5,  # Window size for temporal smoothing
-    deformation_field: torch.Tensor = None,  # Optional deformation field to apply
-    outlier_rejection: bool = True,  # Enable outlier rejection for patch shifts
-    outlier_threshold: float = 3.0,  # Threshold for outlier detection
-    # (standard deviations from median)
-    device: torch.device = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Estimate motion using cross-correlation for the patches.
+    patch_sampling: PatchSamplingConfig,
+    reference_frame: int | None = None,
+    reference_strategy: str = "mean_except_current",
+    fourier_filter: FourierFilterConfig | None = None,
+    refinement: XCRefinementConfig | None = None,
+    initial_deformation_field: DeformationField | None = None,
+    device: torch.device | None = None,
+    verbose: bool = False,
+) -> tuple[DeformationField, torch.Tensor]:
+    """Estimate motion using cross-correlation for the patches.
 
     Parameters
     ----------
@@ -162,6 +139,8 @@ def estimate_motion_cross_correlation_patches(
         (t, h, w) array of images to motion correct
     pixel_spacing: float
         Pixel spacing in angstroms
+    patch_sampling: PatchSamplingConfig
+        Patch extraction configuration, including patch shape and overlap fraction.
     reference_frame: int, optional
         Frame index to use as reference. If None, uses middle frame.
     reference_strategy: str
@@ -169,44 +148,46 @@ def estimate_motion_cross_correlation_patches(
         - "middle_frame": Use the middle frame as reference for all frames
         - "mean_except_current": Use mean of all frames except current frame
         as reference
-    b_factor: float
-        B-factor for frequency filtering
-    frequency_range: tuple[float, float]
-        Frequency range for bandpass filtering in angstroms
-    patch_sidelength: int
-        Size of patches (assumed square)
-    sub_pixel_refinement: bool
-        Whether to use sub-pixel peak finding for more accurate motion estimation
-    temporal_smoothing: bool
-        Whether to apply temporal smoothing across frames for each patch
-    smoothing_window_size: int
-        Window size for temporal smoothing (must be odd number)
-    deformation_field: torch.Tensor, optional
+    fourier_filter: FourierFilterConfig, optional
+        Fourier-space filtering parameters. Defaults to ``FourierFilterConfig()``
+        when None.
+    refinement: XCRefinementConfig, optional
+        Post-processing configuration (sub-pixel refinement, temporal smoothing,
+        outlier rejection). Defaults to ``XCRefinementConfig()`` when None.
+    initial_deformation_field: DeformationField | None
         Optional deformation field to apply to the image before motion estimation.
-        If provided, the image will be corrected using this field first, and the newly
-        calculated motion will be added to this field (cumulative motion correction).
-        If the last two dimensions are (1, 1), uses correct_motion_fast for
-        single patch. If the last two dimensions match the patch grid
-        dimensions (gh, gw), uses correct_motion_fast for patch grid.
-        Otherwise, uses correct_motion for full deformation field.
-    outlier_rejection: bool
-        Whether to enable outlier rejection for patch shifts based on
-        standard deviation from median
-    outlier_threshold: float
-        Threshold for outlier detection in standard deviations from the median.
-        Patches with shifts more than this many standard deviations from
-        the median will be replaced with mean shifts.
+        If provided, the image will be corrected first, and the newly calculated
+        motion will be added to this field (cumulative correction).
+        If shape[-2:] == (1, 1), uses ``correct_motion_fast``; otherwise uses
+        ``correct_motion``.
     device: torch.device, optional
         Device for computation
+    verbose: bool
+        Whether to print progress information. Default is False.
 
     Returns
     -------
-    deformation_field: torch.Tensor
-        (2, t, gh, gw) deformation field for motion correction, where gh
-        and gw are the patch grid dimensions
+    DeformationField
+        Estimated deformation field with shape (2, t, gh, gw).
     data_patch_positions: torch.Tensor
         (t, gh, gw, 3) patch center positions
     """
+    if fourier_filter is None:
+        fourier_filter = FourierFilterConfig()
+    if refinement is None:
+        refinement = XCRefinementConfig()
+
+    # Deconstruct config objects
+    # b_factor = fourier_filter.b_factor
+    # frequency_range = fourier_filter.frequency_range
+    ph, pw = patch_sampling.patch_shape
+    step_h, step_w = patch_sampling.patch_step
+    sub_pixel_refinement = refinement.sub_pixel_refinement
+    temporal_smoothing = refinement.temporal_smoothing
+    smoothing_window_size = refinement.smoothing_window_size
+    outlier_rejection = refinement.outlier_rejection
+    outlier_threshold = refinement.outlier_threshold
+
     if device is None:
         device = image.device
     else:
@@ -220,85 +201,83 @@ def estimate_motion_cross_correlation_patches(
 
     image = normalize_image(image)
 
-    if reference_strategy == "middle_frame":
-        print(f"Cross-correlation patches: using frame {reference_frame} as reference")
-    else:
-        print(
-            "Cross-correlation patches: using mean of all frames except "
-            "current frame as reference"
-        )
-
-    # Apply deformation field if provided
-    if deformation_field is not None:
-        deformation_field = deformation_field.to(device)
-
-        # Check if it's a single patch deformation field (last two dims are 1, 1)
-        if deformation_field.shape[-2:] == (1, 1):
-            print("Applying single patch deformation field using correct_motion_fast")
-            image = correct_motion_fast(
-                image=image, deformation_grid=deformation_field, device=device
+    if verbose:
+        if reference_strategy == "middle_frame":
+            print(
+                f"Cross-correlation patches: using frame {reference_frame} as reference"
             )
         else:
-            print("Applying full deformation field using correct_motion")
+            print(
+                "Cross-correlation patches: using mean of all frames except "
+                "current frame as reference"
+            )
+
+    # Apply initial deformation field if provided
+    if initial_deformation_field is not None:
+        initial_deformation_field = initial_deformation_field.to(device)
+
+        # Check if it's a single patch deformation field (last two dims are 1, 1)
+        if initial_deformation_field.data.shape[-2:] == (1, 1):
+            if verbose:
+                print(
+                    "Applying single patch deformation field using correct_motion_fast"
+                )
+            image = correct_motion_fast(
+                image=image,
+                deformation_field=initial_deformation_field,
+                device=device,
+                verbose=verbose,
+            )
+        else:
+            if verbose:
+                print("Applying full deformation field using correct_motion")
             image = correct_motion(
                 image=image,
-                deformation_grid=deformation_field,
+                deformation_field=initial_deformation_field,
                 pixel_spacing=pixel_spacing,
-                grid_type="bspline",
                 device=device,
             )
-    # Split into patch grid size patches with 50% overlap
-    ph, pw = patch_sidelength, patch_sidelength
+
+    # Split into patch grid using PatchSamplingConfig
     lazy_patch_grid, data_patch_positions = patch_grid_lazy(
         images=image,
         patch_shape=(1, ph, pw),
-        patch_step=(1, ph // 2, pw // 2),
-        distribute_patches=True,
+        patch_step=(1, step_h, step_w),
+        distribute_patches=patch_sampling.distribute_patches,
     )
     gh, gw = data_patch_positions.shape[1:3]
-    print(f"Number of patches per frame: {gh * gw}")
+    if verbose:
+        print(f"Number of patches per frame: {gh * gw}")
 
     # Prepare filters (only need to do this once)
-    mask = circle(
-        radius=pw / 4, image_shape=(ph, pw), smoothing_radius=pw / 8, device=device
-    )
-
-    b_factor_envelope = b_envelope(
-        B=b_factor,
-        image_shape=(ph, pw),
-        pixel_size=pixel_spacing,
-        rfft=True,
-        fftshift=False,
-        device=device,
-    )
-
-    bandpass = prepare_bandpass_filter(
-        frequency_range=frequency_range,
-        patch_shape=(ph, pw),
+    mask, b_factor_envelope, bandpass = prepare_patch_filters(
+        shape=(ph, pw),
         pixel_spacing=pixel_spacing,
+        fourier_filter=fourier_filter,
         device=device,
     )
 
-    # Initialize or update deformation field
-    if deformation_field is None:
-        deformation_field = torch.zeros((2, t, gh, gw), device=device)
+    # Initialize or update raw deformation field tensor
+    if initial_deformation_field is None:
+        raw_field = torch.zeros((2, t, gh, gw), device=device)
     else:
-        # Update existing deformation field to match new dimensions
+        raw_field = initial_deformation_field.resample((t, gh, gw)).data
+        if verbose:
+            print(
+                "Using existing deformation field as base for cumulative motion "
+                "correction"
+            )
 
-        deformation_field = resample_deformation_field(
-            deformation_field=deformation_field,
-            target_resolution=(t, gh, gw),
-        )
-        print(
-            "Using existing deformation field as base for cumulative motion correction"
-        )
+    # Use local variable for the raw tensor during frame processing
+    deformation_field_tensor = raw_field
 
     # Process each frame individually to manage memory
     for frame_idx in range(t):
         if reference_strategy == "middle_frame" and frame_idx == reference_frame:
             continue  # Reference frame has zero shift
 
-        print(f"Processing frame {frame_idx}/{t - 1}")
+        if verbose:
+            print(f"Processing frame {frame_idx}/{t - 1}")
 
         # Determine reference patches based on strategy
         if reference_strategy == "middle_frame":
@@ -375,40 +354,52 @@ def estimate_motion_cross_correlation_patches(
         # Apply outlier rejection if enabled
         if outlier_rejection:
             shift_y, shift_x = _apply_outlier_rejection(
-                shift_y, shift_x, outlier_threshold, frame_idx
+                shift_y, shift_x, outlier_threshold, frame_idx, verbose=verbose
             )
 
         # Add shifts to existing deformation field (cumulative motion correction)
         # Convert pixels to Angstroms
         shift_y = shift_y * pixel_spacing
         shift_x = shift_x * pixel_spacing
-        deformation_field[0, frame_idx, :, :] += (
-            shift_y  # subtract shift for deformation field
-        )
-        deformation_field[1, frame_idx, :, :] += shift_x
+        deformation_field_tensor[0, frame_idx, :, :] += shift_y
+        deformation_field_tensor[1, frame_idx, :, :] += shift_x
 
     # Apply temporal smoothing if enabled
     if temporal_smoothing:
-        print(f"Applying temporal smoothing with window size {smoothing_window_size}")
-        deformation_field = _apply_temporal_smoothing(
-            deformation_field, smoothing_window_size, device
+        if verbose:
+            print(
+                f"Applying temporal smoothing with window size {smoothing_window_size}"
+            )
+        deformation_field_tensor = _apply_temporal_smoothing(
+            deformation_field_tensor, smoothing_window_size, device
         )
+        if verbose:
+            def_min_y = deformation_field_tensor[0].min()
+            def_max_y = deformation_field_tensor[0].max()
+            def_min_x = deformation_field_tensor[1].min()
+            def_max_x = deformation_field_tensor[1].max()
+            print(
+                f"After temporal smoothing - range: "
+                f"y=[{def_min_y:.1f}, {def_max_y:.1f}], "
+                f"x=[{def_min_x:.1f}, {def_max_x:.1f}]"
+            )
+
+    if verbose:
+        def_min_y = deformation_field_tensor[0].min()
+        def_max_y = deformation_field_tensor[0].max()
+        def_min_x = deformation_field_tensor[1].min()
+        def_max_x = deformation_field_tensor[1].max()
         print(
-            f"After temporal smoothing - range: "
-            f"y=[{deformation_field[0].min():.1f}, {deformation_field[0].max():.1f}], "
-            f"x=[{deformation_field[1].min():.1f}, {deformation_field[1].max():.1f}]"
+            f"Estimated deformation field range: "
+            f"y=[{def_min_y:.1f}, {def_max_y:.1f}], "
+            f"x=[{def_min_x:.1f}, {def_max_x:.1f}]"
         )
+        print(f"Estimated deformation field shape: {deformation_field_tensor.shape}")
 
-    print(
-        f"Estimated deformation field range: "
-        f"y=[{deformation_field[0].min():.1f}, {deformation_field[0].max():.1f}], "
-        f"x=[{deformation_field[1].min():.1f}, {deformation_field[1].max():.1f}]"
+    deformation_field_tensor = deformation_field_tensor - torch.mean(
+        deformation_field_tensor
     )
-
-    print(f"Estimated deformation field shape: {deformation_field.shape}")
-
-    deformation_field = deformation_field - torch.mean(deformation_field)
-    return deformation_field, data_patch_positions
+    return DeformationField(data=deformation_field_tensor), data_patch_positions
 
 
 def _apply_sub_pixel_refinement(
@@ -417,8 +408,7 @@ def _apply_sub_pixel_refinement(
     patch_height: int,
     patch_width: int,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """
-    Apply sub-pixel refinement to peak positions using parabolic fitting.
+    """Apply sub-pixel refinement to peak positions using parabolic fitting.
 
     Parameters
     ----------
@@ -486,8 +476,7 @@ def _apply_sub_pixel_refinement(
 def _apply_temporal_smoothing(
     deformation_field: torch.Tensor, window_size: int, device: torch.device
 ) -> torch.Tensor:
-    """
-    Apply temporal smoothing to deformation field across frames for each patch.
+    """Apply temporal smoothing to deformation field across frames for each patch.
 
     Parameters
     ----------
@@ -540,6 +529,7 @@ def _apply_outlier_rejection(
     shift_x: torch.Tensor,  # (gh, gw) x shifts
     outlier_threshold: float,  # standard deviations from median
     frame_idx: int,  # For logging
+    verbose: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """
     Apply outlier rejection to patch shifts using standard deviation from median.
@@ -557,6 +547,8 @@ def _apply_outlier_rejection(
         Threshold in standard deviations from median for outlier detection
     frame_idx: int
         Frame index for logging purposes
+    verbose: bool
+        Whether to print outlier counts. Default is False.
 
     Returns
     -------
@@ -598,7 +590,7 @@ def _apply_outlier_rejection(
     num_outliers_combined = outliers_combined.sum().item()
     total_patches = shift_y_flat.numel()
 
-    if num_outliers_combined > 0:
+    if verbose and num_outliers_combined > 0:
         print(
             f"Frame {frame_idx}: Found {num_outliers_y} Y outliers, "
             f"{num_outliers_x} X outliers, {num_outliers_combined} patches "

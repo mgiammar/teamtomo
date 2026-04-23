@@ -1,9 +1,15 @@
 """Utilities for motion correction."""
 
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 import torch
 from torch_fourier_filter.bandpass import bandpass_filter
+from torch_fourier_filter.envelopes import b_envelope
+from torch_grid_utils import circle
+
+if TYPE_CHECKING:
+    from torch_motion_correction.types import FourierFilterConfig
 
 
 def array_to_grid_sample(
@@ -82,6 +88,67 @@ def normalize_image(
     # normalize and return
     image = (image - mean) / std
     return image
+
+
+def prepare_patch_filters(
+    shape: tuple[int, int],
+    pixel_spacing: float,
+    fourier_filter: "FourierFilterConfig",
+    mask_smoothing_fraction: float = 0.5,
+    device: torch.device | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Prepare the three reusable image filters (real-space and Fourier) for a patch.
+
+    Parameters
+    ----------
+    shape : tuple[int, int]
+        (h, w) spatial dimensions of the region to filter.
+    pixel_spacing : float
+        Pixel spacing in Angstroms.
+    fourier_filter : FourierFilterConfig
+        B-factor and frequency-range parameters.
+    mask_smoothing_fraction : float
+        Sets the circle-mask smoothing radius as a fraction of the mask radius.
+        ``smoothing_radius = (min(h, w) / 4) * mask_smoothing_fraction``.
+        Use 0.5 for a gentle roll-off (default, matches XC estimator) or 1.0
+        for the sharper roll-off used by the optimizer estimator.
+    device : torch.device, optional
+        Device for the output tensors.
+
+    Returns
+    -------
+    circle_mask : torch.Tensor
+        Real-space circular apodisation mask with shape (h, w).
+    b_factor_envelope : torch.Tensor
+        rFFT-space B-factor envelope with shape (h, w//2 + 1).
+    bandpass : torch.Tensor
+        rFFT-space bandpass filter with shape (h, w//2 + 1).
+    """
+    h, w = shape
+    radius = min(h, w) / 4
+    smoothing_radius = radius * mask_smoothing_fraction
+
+    circle_mask = circle(
+        radius=radius,
+        image_shape=shape,
+        smoothing_radius=smoothing_radius,
+        device=device,
+    )
+    b_factor_envelope = b_envelope(
+        B=fourier_filter.b_factor,
+        image_shape=shape,
+        pixel_size=pixel_spacing,
+        rfft=True,
+        fftshift=False,
+        device=device,
+    )
+    bandpass = prepare_bandpass_filter(
+        frequency_range=fourier_filter.frequency_range,
+        patch_shape=shape,
+        pixel_spacing=pixel_spacing,
+        device=device,
+    )
+    return circle_mask, b_factor_envelope, bandpass
 
 
 def prepare_bandpass_filter(
