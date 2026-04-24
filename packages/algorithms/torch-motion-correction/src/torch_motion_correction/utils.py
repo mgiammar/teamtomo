@@ -1,6 +1,6 @@
 """Utilities for motion correction."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 import torch
@@ -10,6 +10,38 @@ from torch_grid_utils import circle
 
 if TYPE_CHECKING:
     from torch_motion_correction.types import FourierFilterConfig
+
+
+def make_early_stopper(
+    patience: int = 5,
+    window_size: int = 3,
+    tolerance: float = 1e-5,
+) -> Callable[[float], bool]:
+    """Return a stateful callable that signals when optimization should stop.
+
+    Uses a moving-average smoothed loss to detect plateaus. Returns True once
+    the smoothed loss has failed to improve by more than ``tolerance`` for
+    ``patience`` consecutive steps.
+    """
+    loss_history: list[float] = []
+    wait = 0
+    best_smoothed = float("inf")
+
+    def update(loss: float) -> bool:
+        nonlocal wait, best_smoothed
+        loss_history.append(loss)
+        if len(loss_history) < window_size:
+            return False
+        smoothed = sum(loss_history[-window_size:]) / window_size
+        improvement = (best_smoothed - smoothed) / (abs(best_smoothed) + 1e-9)
+        if improvement > tolerance:
+            best_smoothed = smoothed
+            wait = 0
+        else:
+            wait += 1
+        return wait >= patience
+
+    return update
 
 
 def array_to_grid_sample(

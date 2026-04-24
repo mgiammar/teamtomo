@@ -10,10 +10,7 @@ import tqdm
 from torch_fourier_shift import fourier_shift_dft_2d
 
 from torch_motion_correction.deformation_field import DeformationField
-from torch_motion_correction.optimization_state import (
-    EarlyStopping,
-    OptimizationTracker,
-)
+from torch_motion_correction.optimization_state import OptimizationTracker
 from torch_motion_correction.patch_utils import ImagePatchIterator
 from torch_motion_correction.types import (
     FourierFilterConfig,
@@ -157,15 +154,7 @@ def estimate_local_motion(
             t=t,
         )
 
-    early_stopper = (
-        EarlyStopping(
-            patience=optimization.early_stopping_patience,
-            window_size=optimization.early_stopping_window_size,
-            tolerance=optimization.early_stopping_tolerance,
-        )
-        if optimization.early_stopping
-        else None
-    )
+    early_stopper = optimization.build_early_stopper()
 
     pbar = tqdm.tqdm(range(max_iterations))
     for iter_idx in pbar:
@@ -194,7 +183,7 @@ def estimate_local_motion(
             )
 
         # Break loop if early stopping criterion is met
-        if early_stopper is not None and early_stopper.update(avg_loss):
+        if early_stopper is not None and early_stopper(avg_loss):
             pbar.write(f"Early stopping at iter {iter_idx}. avg_loss={avg_loss:.6f}")
             break
 

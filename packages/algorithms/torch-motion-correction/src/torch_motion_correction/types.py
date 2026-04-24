@@ -1,11 +1,13 @@
 """Helper dataclasses for grouping related parameters in motion correction."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
 from torch_grid_utils.patch_grid import patch_grid_centers
 
 from torch_motion_correction.patch_utils import ImagePatchIterator
+from torch_motion_correction.utils import make_early_stopper
 
 
 @dataclass
@@ -131,6 +133,17 @@ class OptimizationConfig:
     early_stopping_window_size: int = 3
     early_stopping_tolerance: float = 1e-5
     early_stopping: bool = False
+
+    def build_early_stopper(self) -> Callable[[float], bool] | None:
+        """Return a stateful early-stopping callable, or None if disabled."""
+        if not self.early_stopping:
+            return None
+
+        return make_early_stopper(
+            patience=self.early_stopping_patience,
+            window_size=self.early_stopping_window_size,
+            tolerance=self.early_stopping_tolerance,
+        )
 
 
 @dataclass
