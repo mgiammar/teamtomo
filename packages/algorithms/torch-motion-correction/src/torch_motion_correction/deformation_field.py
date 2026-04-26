@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Optional
 
 import einops
+import h5py
 import pandas as pd
 import torch
 import torch.nn.functional as F
@@ -161,33 +162,6 @@ class DeformationField:
         new_data = einops.rearrange(new_data, "nt nh nw yx -> yx nt nh nw")
         return DeformationField(data=new_data, grid_type=self.grid_type)
 
-    def to_csv(self, output_path: str | Path) -> None:
-        """Write the deformation field to a CSV file.
-
-        Parameters
-        ----------
-        output_path : str or Path
-            Destination CSV path. Parent directories are created if needed.
-        """
-        output_path = Path(output_path)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-
-        data = self.data.detach().cpu()
-        _, t, h, w = data.shape
-        t_idx, h_idx, w_idx = torch.meshgrid(
-            torch.arange(t), torch.arange(h), torch.arange(w), indexing="ij"
-        )
-        df = pd.DataFrame(
-            {
-                "t": t_idx.flatten().numpy(),
-                "h": h_idx.flatten().numpy(),
-                "w": w_idx.flatten().numpy(),
-                "y_shift": data[0].flatten().numpy(),
-                "x_shift": data[1].flatten().numpy(),
-            }
-        )
-        df.to_csv(output_path, index=False)
-
     @classmethod
     def from_frame_shifts(
         cls,
@@ -277,6 +251,61 @@ class DeformationField:
 
         return new_field, base_field
 
+    # --- Input/Output methods --------------
+
+    def to_csv(self, output_path: str | Path) -> None:
+        """Write the deformation field to a CSV file.
+
+        Parameters
+        ----------
+        output_path : str or Path
+            Destination CSV path. Parent directories are created if needed.
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = self.data.detach().cpu()
+        _, t, h, w = data.shape
+        t_idx, h_idx, w_idx = torch.meshgrid(
+            torch.arange(t), torch.arange(h), torch.arange(w), indexing="ij"
+        )
+        df = pd.DataFrame(
+            {
+                "t": t_idx.flatten().numpy(),
+                "h": h_idx.flatten().numpy(),
+                "w": w_idx.flatten().numpy(),
+                "y_shift": data[0].flatten().numpy(),
+                "x_shift": data[1].flatten().numpy(),
+            }
+        )
+        df.to_csv(output_path, index=False)
+
+    def to_hdf5(self, output_path: str | Path) -> None:
+        """Write the deformation field to an HDF5 file.
+
+        Note
+        ----
+        HDF5 file format has the following structure:
+        - Root group
+            - data (dataset): shape (2, nt, nh, nw), dtype float32
+            - Attributes:
+                - grid_type: string, either "catmull_rom" or "bspline"
+                - shift_units: string, "angstroms"
+
+        Parameters
+        ----------
+        output_path : str or Path
+            Destination HDF5 path. Parent directories are created if needed.
+        """
+        output_path = Path(output_path)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+
+        data = self.data.detach().cpu().numpy()
+        with h5py.File(output_path, "w") as f:
+            f.create_dataset("data", data=data)
+            f["data"].attrs["grid_type"] = self.grid_type
+            f["data"].attrs["shift_units"] = "angstroms"
+
     @classmethod
     def from_csv(
         cls,
@@ -319,6 +348,32 @@ class DeformationField:
         data[1, t_idxs, h_idxs, w_idxs] = torch.tensor(
             df["x_shift"].to_numpy(), dtype=torch.float32
         )
+        if device is not None:
+            data = data.to(device)
+        return cls(data=data, grid_type=grid_type)
+
+    @classmethod
+    def from_hdf5(
+        cls,
+        hdf5_path: str | Path,
+        device: torch.device | None = None,
+    ) -> "DeformationField":
+        """Load a DeformationField from an HDF5 file written by :meth:`to_hdf5`.
+
+        Parameters
+        ----------
+        hdf5_path : str or Path
+            Path to the input HDF5 file.
+        device : torch.device, optional
+            Device for the output tensor.
+
+        Returns
+        -------
+        DeformationField
+        """
+        with h5py.File(hdf5_path, "r") as f:
+            data = torch.tensor(f["data"][:], dtype=torch.float32)
+            grid_type = f["data"].attrs["grid_type"]
         if device is not None:
             data = data.to(device)
         return cls(data=data, grid_type=grid_type)
