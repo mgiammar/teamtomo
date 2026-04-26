@@ -19,26 +19,29 @@ def make_early_stopper(
 ) -> Callable[[float], bool]:
     """Return a stateful callable that signals when optimization should stop.
 
-    Uses a moving-average smoothed loss to detect plateaus. Returns True once
-    the smoothed loss has failed to improve by more than ``tolerance`` for
-    ``patience`` consecutive steps.
+    Early stopping is triggered (returns True) when an average of the loss history (of
+    'window_size') has a relative change (in absolute terms) less than 'tolerance' for
+    'patience' consecutive checks. Otherwise, continue optimization (returns False).
     """
     loss_history: list[float] = []
     wait = 0
-    best_smoothed = float("inf")
 
     def update(loss: float) -> bool:
-        nonlocal wait, best_smoothed
+        nonlocal loss_history, wait
+
         loss_history.append(loss)
         if len(loss_history) < window_size:
             return False
-        smoothed = sum(loss_history[-window_size:]) / window_size
-        improvement = (best_smoothed - smoothed) / (abs(best_smoothed) + 1e-9)
-        if improvement > tolerance:
-            best_smoothed = smoothed
+
+        smoothed_this = sum(loss_history[-window_size:]) / window_size
+        smoothed_prev = sum(loss_history[-window_size - 1 : -1]) / window_size
+        relative_diff = (smoothed_this - smoothed_prev) / (abs(smoothed_prev) + 1e-12)
+
+        if abs(relative_diff) > tolerance:
             wait = 0
         else:
             wait += 1
+
         return wait >= patience
 
     return update
