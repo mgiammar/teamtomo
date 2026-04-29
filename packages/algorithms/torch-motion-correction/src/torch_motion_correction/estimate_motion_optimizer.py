@@ -52,7 +52,7 @@ def estimate_local_motion(
         Fourier-space filtering parameters (b_factor and frequency_range).
         Defaults to ``FourierFilterConfig()`` when None.
     optimization: OptimizationConfig | None
-        Optimization hyper-parameters (n_iterations, optimizer, loss, grid type).
+        Optimization hyper-parameters (max_iterations, optimizer, loss, grid type).
         Defaults to ``OptimizationConfig()`` when None.
     device: torch.device | None
         Device to perform computation on. If None, uses the device of the input image.
@@ -76,7 +76,7 @@ def estimate_local_motion(
     ph, pw = patch_shape
     # b_factor = fourier_filter.b_factor
     # frequency_range = fourier_filter.frequency_range
-    n_iterations = optimization.n_iterations
+    max_iterations = optimization.max_iterations
     optimizer_type = optimization.optimizer_type
     loss_type = optimization.loss_type
     grid_type = optimization.grid_type
@@ -88,7 +88,7 @@ def estimate_local_motion(
 
     trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
     trajectory_kwargs.setdefault("sample_every_n_steps", 1)
-    trajectory_kwargs.setdefault("total_steps", n_iterations)
+    trajectory_kwargs.setdefault("total_steps", max_iterations)
     trajectory = OptimizationTracker(**trajectory_kwargs)
 
     # Normalize image based on stats from central 50% of image
@@ -154,8 +154,9 @@ def estimate_local_motion(
             t=t,
         )
 
-    # "Training" loop going over all patches n_iterations times
-    pbar = tqdm.tqdm(range(n_iterations))
+    early_stopper = optimization.build_early_stopper()
+
+    pbar = tqdm.tqdm(range(max_iterations))
     for iter_idx in pbar:
         if optimizer_type.lower() == "lbfgs":
             avg_loss = _run_lbfgs_step(
@@ -180,6 +181,11 @@ def estimate_local_motion(
                 loss=avg_loss,
                 step=iter_idx,
             )
+
+        # Break loop if early stopping criterion is met
+        if early_stopper is not None and early_stopper(avg_loss):
+            pbar.write(f"Early stopping at iter {iter_idx}. avg_loss={avg_loss:.6f}")
+            break
 
     # Return final deformation field
     final_data = new_deformation_field.data.detach() + deformation_field.data

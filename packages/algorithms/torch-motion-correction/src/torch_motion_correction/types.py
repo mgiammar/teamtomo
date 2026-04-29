@@ -1,11 +1,13 @@
 """Helper dataclasses for grouping related parameters in motion correction."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import torch
+from torch_grid_utils.patch_grid import patch_grid_centers
 
-from torch_motion_correction.patch_grid import patch_grid_centers
 from torch_motion_correction.patch_utils import ImagePatchIterator
+from torch_motion_correction.utils import make_early_stopper
 
 
 @dataclass
@@ -99,8 +101,8 @@ class OptimizationConfig:
 
     Parameters
     ----------
-    n_iterations : int
-        Number of optimization iterations. Default is 100.
+    max_iterations : int
+        Maximum number of optimization iterations. Default is 100.
     optimizer_type : str
         Optimizer to use. One of "adam", "sgd", "rmsprop", "lbfgs".
         Default is "adam".
@@ -111,13 +113,37 @@ class OptimizationConfig:
         Either "catmull_rom" or "bspline". Default is "catmull_rom".
     optimizer_kwargs : dict, optional
         Additional keyword arguments forwarded to the optimizer constructor.
+    early_stopping : bool
+        Whether to enable early stopping. Default is False.
+    early_stopping_patience : int
+        Number of steps without significant improvement before stopping. Default is 5.
+    early_stopping_window_size : int
+        Number of recent loss values to average for smoothing. Default is 3.
+    early_stopping_tolerance : float
+        Minimum relative improvement in the smoothed loss to reset the patience
+        counter. Default is 1e-5.
     """
 
-    n_iterations: int = 100
+    max_iterations: int = 100
     optimizer_type: str = "adam"
     loss_type: str = "mse"
     grid_type: str = "catmull_rom"
     optimizer_kwargs: dict | None = None
+    early_stopping_patience: int = 5
+    early_stopping_window_size: int = 3
+    early_stopping_tolerance: float = 1e-5
+    early_stopping: bool = False
+
+    def build_early_stopper(self) -> Callable[[float], bool] | None:
+        """Return a stateful early-stopping callable, or None if disabled."""
+        if not self.early_stopping:
+            return None
+
+        return make_early_stopper(
+            patience=self.early_stopping_patience,
+            window_size=self.early_stopping_window_size,
+            tolerance=self.early_stopping_tolerance,
+        )
 
 
 @dataclass
