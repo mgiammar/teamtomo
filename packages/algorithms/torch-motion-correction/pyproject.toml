@@ -50,6 +50,7 @@ dependencies = [
     "einops",
     "tqdm",
     "pandas",
+    "h5py",
     "torch-image-interpolation",
     "torch-fourier-shift",
     "torch-grid-utils",
