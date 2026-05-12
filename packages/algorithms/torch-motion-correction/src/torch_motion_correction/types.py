@@ -133,6 +133,9 @@ class OptimizationConfig:
     early_stopping_window_size: int = 3
     early_stopping_tolerance: float = 1e-5
     early_stopping: bool = False
+    batch_size: int = 8
+    precompute_patches: bool = True
+    use_compile: bool = False
 
     def build_early_stopper(self) -> Callable[[float], bool] | None:
         """Return a stateful early-stopping callable, or None if disabled."""

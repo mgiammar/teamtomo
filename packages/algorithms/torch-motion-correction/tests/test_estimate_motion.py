@@ -334,3 +334,27 @@ class TestEstimateLocalMotion:
             device=torch.device("cpu"),
         )
         assert isinstance(result, DeformationField)
+
+    def test_precompute_patches_enabled(self, sample_image, pixel_spacing):
+        """precompute_patches=True (new default) produces valid output shape."""
+        result, _ = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(max_iterations=2, precompute_patches=True),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+
+    def test_precompute_patches_disabled(self, sample_image, pixel_spacing):
+        """precompute_patches=False fallback produces the same output shape."""
+        result, _ = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(max_iterations=2, precompute_patches=False),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)

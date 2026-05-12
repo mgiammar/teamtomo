@@ -81,6 +81,9 @@ def estimate_local_motion(
     loss_type = optimization.loss_type
     grid_type = optimization.grid_type
     optimizer_kwargs = optimization.optimizer_kwargs
+    batch_size = optimization.batch_size
+    precompute_patches = optimization.precompute_patches
+    use_compile = optimization.use_compile
 
     device = device if device is not None else image.device
     image = image.to(device)
@@ -134,7 +137,34 @@ def estimate_local_motion(
             else True
         )
 
-    # Helper inner function to to have all other arguments fixed
+    # ── Precompute phase (skipped for LBFGS — handled inside closure) ────────
+    n_patches = (
+        image_patch_iterator.control_points.shape[1]
+        * image_patch_iterator.control_points.shape[2]
+    )
+    centers_all = image_patch_iterator.control_points_normalized.reshape(
+        t, n_patches, 3
+    )
+
+    # Evaluate the frozen base field once at all patch centers and cache the result.
+    # deformation_field((t, n_patches, 3)) → (t, n_patches, 2)
+    with torch.no_grad():
+        base_shifts_cache = deformation_field(centers_all).detach()
+        base_shifts_cache = base_shifts_cache.permute(1, 0, 2).contiguous()  # (n_patches, t, 2)
+
+    # Precompute masked FFT for all patches and store on CPU pinned memory so
+    # that per-batch GPU transfers are fast and do not exhaust GPU memory for
+    # large movies.
+    precomputed_fft = None
+    if precompute_patches and optimizer_type.lower() != "lbfgs":
+        precomputed_fft = image_patch_iterator.precompute_fft_patches(
+            circle_mask=circle_mask,
+            store_device=torch.device("cpu"),
+        )
+
+    # ── Closures ──────────────────────────────────────────────────────────────
+
+    # Standard (non-precomputed) forward pass — used by LBFGS and as fallback
     def process_batch(
         patch_batch: torch.Tensor,
         patch_batch_centers: torch.Tensor,
@@ -154,6 +184,38 @@ def estimate_local_motion(
             t=t,
         )
 
+    # Precomputed forward pass — skips mask+FFT and frozen field evaluation
+    def process_batch_precomputed(
+        fft_batch: torch.Tensor,
+        patch_batch_centers: torch.Tensor,
+        base_shifts_batch: torch.Tensor,
+    ) -> torch.Tensor:
+        return _process_patch_batch_precomputed(
+            fft_batch=fft_batch,
+            patch_batch_centers=patch_batch_centers,
+            base_shifts_batch=base_shifts_batch,
+            b_factor_envelope=b_factor_envelope,
+            bandpass=bandpass_filter,
+            new_deformation_field=new_deformation_field,
+            pixel_spacing=pixel_spacing,
+            ph=ph,
+            pw=pw,
+            loss_type=loss_type,
+            t=t,
+        )
+
+    # Optionally compile the forward pass functions to reduce per-call overhead.
+    # mode="reduce-overhead" uses CUDAGraphs on CUDA; falls back to eager on CPU/MPS.
+    # The t > 1 branch in _process_patch_batch_precomputed is replaced by max(t-1,1)
+    # to avoid a dynamic control-flow graph break under compilation.
+    if use_compile:
+        process_batch_precomputed = torch.compile(  # type: ignore[assignment]
+            process_batch_precomputed, mode="reduce-overhead"
+        )
+        process_batch = torch.compile(  # type: ignore[assignment]
+            process_batch, mode="reduce-overhead"
+        )
+
     early_stopper = optimization.build_early_stopper()
 
     pbar = tqdm.tqdm(range(max_iterations))
@@ -167,11 +229,22 @@ def estimate_local_motion(
                 use_checkpointing=use_checkpointing,
                 device=device,
             )
+        elif precompute_patches and precomputed_fft is not None:
+            avg_loss = _run_standard_step_precomputed(
+                motion_optimizer=motion_optimizer,
+                image_patch_iterator=image_patch_iterator,
+                precomputed_fft=precomputed_fft,
+                base_shifts_cache=base_shifts_cache,
+                process_batch_precomputed_fn=process_batch_precomputed,
+                batch_size=batch_size,
+                compute_device=device,
+            )
         else:
             avg_loss = _run_standard_step(
                 motion_optimizer=motion_optimizer,
                 image_patch_iterator=image_patch_iterator,
                 process_batch_fn=process_batch,
+                batch_size=batch_size,
             )
 
         pbar.set_postfix({"avg_batch_loss": f"{avg_loss:.6f}"})
@@ -346,6 +419,7 @@ def _run_standard_step(
     motion_optimizer: torch.optim.Optimizer,
     image_patch_iterator: ImagePatchIterator,
     process_batch_fn: Callable,
+    batch_size: int = 8,
 ) -> float:
     """Execute one gradient-accumulation step for Adam/SGD/RMSprop.
 
@@ -357,13 +431,15 @@ def _run_standard_step(
         Iterator that yields (patch_batch, patch_centers) mini-batches.
     process_batch_fn : Callable
         Partially-applied ``_process_patch_batch`` with all frozen args bound.
+    batch_size : int
+        Number of patches per mini-batch. Default is 8.
 
     Returns
     -------
     float
         Average per-batch loss for this step.
     """
-    patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
+    patch_iter = image_patch_iterator.get_iterator(batch_size=batch_size)
     total_loss = 0.0
     n_batches = 0
     for patch_batch, patch_batch_centers in patch_iter:
@@ -374,6 +450,138 @@ def _run_standard_step(
     motion_optimizer.step()
     motion_optimizer.zero_grad()
     return total_loss / n_batches if n_batches > 0 else 0.0
+
+
+def _run_standard_step_precomputed(
+    motion_optimizer: torch.optim.Optimizer,
+    image_patch_iterator: ImagePatchIterator,
+    precomputed_fft: torch.Tensor,
+    base_shifts_cache: torch.Tensor,
+    process_batch_precomputed_fn: Callable,
+    batch_size: int = 8,
+    compute_device: torch.device | None = None,
+) -> float:
+    """Gradient-accumulation step using precomputed FFT patches and cached base shifts.
+
+    Parameters
+    ----------
+    motion_optimizer : torch.optim.Optimizer
+        The optimizer (Adam, SGD, or RMSprop).
+    image_patch_iterator : ImagePatchIterator
+        Iterator used to yield shuffled patch indices and centers.
+    precomputed_fft : torch.Tensor
+        (n_patches, t, ph, pw//2+1) complex64 — typically on CPU pinned memory.
+    base_shifts_cache : torch.Tensor
+        (n_patches, t, 2) float32 — frozen base field shifts, on ``compute_device``.
+    process_batch_precomputed_fn : Callable
+        Partially-applied ``_process_patch_batch_precomputed`` with frozen args bound.
+    batch_size : int
+        Number of patches per mini-batch. Default is 8.
+    compute_device : torch.device | None
+        Device to transfer each FFT batch to. Defaults to ``base_shifts_cache.device``.
+
+    Returns
+    -------
+    float
+        Average per-batch loss for this step.
+    """
+    if compute_device is None:
+        compute_device = base_shifts_cache.device
+
+    patch_iter = image_patch_iterator.get_precomputed_iterator(
+        precomputed_fft=precomputed_fft,
+        base_shifts_cache=base_shifts_cache,
+        batch_size=batch_size,
+        randomized=True,
+        compute_device=compute_device,
+    )
+    total_loss = 0.0
+    n_batches = 0
+    for fft_batch, centers_batch, base_shifts_batch in patch_iter:
+        loss = process_batch_precomputed_fn(fft_batch, centers_batch, base_shifts_batch)
+        loss.backward()
+        total_loss += loss.item()
+        n_batches += 1
+    motion_optimizer.step()
+    motion_optimizer.zero_grad()
+    return total_loss / n_batches if n_batches > 0 else 0.0
+
+
+def _process_patch_batch_precomputed(
+    fft_batch: torch.Tensor,
+    patch_batch_centers: torch.Tensor,
+    base_shifts_batch: torch.Tensor,
+    b_factor_envelope: torch.Tensor,
+    bandpass: torch.Tensor,
+    new_deformation_field: DeformationField,
+    pixel_spacing: float,
+    ph: int,
+    pw: int,
+    loss_type: str,
+    t: int,
+) -> torch.Tensor:
+    """Forward pass using precomputed FFT patches and cached base field shifts.
+
+    Compared to ``_process_patch_batch``, this function skips the real-space
+    mask multiplication, the rFFT, and the frozen base field spline evaluation —
+    all of which are constant across iterations and are precomputed once before
+    the optimization loop.
+
+    Parameters
+    ----------
+    fft_batch : torch.Tensor
+        (b, t, ph, pw//2+1) complex64 — masked rFFT of patches, precomputed.
+    patch_batch_centers : torch.Tensor
+        (t, b, 3) normalized (t, y, x) coordinates.
+    base_shifts_batch : torch.Tensor
+        (t, b, 2) frozen base deformation field shifts in Angstroms, detached.
+    b_factor_envelope : torch.Tensor
+        (ph, pw//2+1) rFFT-space B-factor envelope.
+    bandpass : torch.Tensor
+        (ph, pw//2+1) rFFT-space bandpass filter.
+    new_deformation_field : DeformationField
+        Optimisable deformation field increment.
+    pixel_spacing : float
+        Pixel spacing in Angstroms.
+    ph : int
+        Patch height in pixels.
+    pw : int
+        Patch width in pixels.
+    loss_type : str
+        Loss function name ("mse", "ncc", or "cc").
+    t : int
+        Number of frames.
+
+    Returns
+    -------
+    torch.Tensor
+        Scalar loss value.
+    """
+    # Only the learnable field is evaluated each forward pass
+    new_shifts = new_deformation_field(patch_batch_centers)  # (t, b, 2)
+    predicted_shifts = -1 * (new_shifts + base_shifts_batch)  # (t, b, 2)
+    # Rearrange to (b, t, 2) for fourier_shift_dft_2d
+    predicted_shifts = einops.rearrange(predicted_shifts, "t b yx -> b t yx")
+    predicted_shifts_px = predicted_shifts / pixel_spacing
+
+    shifted_patches = fourier_shift_dft_2d(
+        dft=fft_batch,
+        image_shape=(ph, pw),
+        shifts=predicted_shifts_px,
+        rfft=True,
+        fftshifted=False,
+        cache_intermediates=True,
+    )  # (b, t, ph, pw//2+1)
+
+    if bandpass is not None:
+        shifted_patches = shifted_patches * bandpass
+    if b_factor_envelope is not None:
+        shifted_patches = shifted_patches * b_factor_envelope
+
+    total_sum = torch.sum(shifted_patches, dim=1, keepdim=True)
+    reference_patches = (total_sum - shifted_patches) / max(t - 1, 1)
+
+    return _compute_loss(shifted_patches, reference_patches, ph, pw, loss_type=loss_type)
 
 
 def _compute_shifted_patches_and_shifts(
