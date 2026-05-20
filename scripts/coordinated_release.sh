@@ -52,10 +52,14 @@ if [[ -z "$PACKAGES" ]]; then
     exit 1
 fi
 
-TAGS=("teamtomo@${VERSION}")
+# Build tag list from all workspace packages (includes teamtomo from root pyproject.toml)
+TAGS=()
 for pkg in $PACKAGES; do
     TAGS+=("${pkg}@${VERSION}")
 done
+
+# Dedup in case of any accidental duplicates
+mapfile -t TAGS < <(printf '%s\n' "${TAGS[@]}" | sort -u)
 
 # Check for existing tags (local + remote)
 EXISTING=()
@@ -64,7 +68,7 @@ for tag in "${TAGS[@]}"; do
         EXISTING+=("$tag")
         continue
     fi
-    if git ls-remote --tags origin "$tag" | grep -q "$tag"; then
+    if git ls-remote --tags upstream "$tag" | grep -q "$tag"; then
         EXISTING+=("$tag")
     fi
 done
@@ -81,7 +85,7 @@ done
 
 # Wait for user confirmation before pushing.
 # If cancel, then delete the local tags.
-read -p "Tags created: ${TAGS[*]}. Push to origin? (y/n) " -n 1 -r
+read -p "Tags created: ${TAGS[*]}. Push to upstream? (y/n) " -n 1 -r
 echo
 if [[ ! $REPLY =~ ^[Yy]$ ]]; then
     echo "Aborting. Deleting local tags: ${TAGS[*]}"

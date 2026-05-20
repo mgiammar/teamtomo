@@ -1,7 +1,7 @@
 # --- Deployment workflow for a single package in TeamTomo ---
 #
-# Workflow will be triggered on pushes to tags matching the pattern "*@v*" (e.g., "package@v1.0.0"),
-# but excluding tags starting with "teamtomo@" which is reserved for a coordinated release process.
+# Workflow triggers on any published GitHub release, including "teamtomo@v*" (the root meta-package)
+# and individual package releases matching "package-name@v*".
 # The workflow performs the following steps:
 # 1. Verifies that the tag is on the main branch to ensure only stable code is deployed.
 # 2. Checks that the CI tests have passed for the commit associated with the tag.
