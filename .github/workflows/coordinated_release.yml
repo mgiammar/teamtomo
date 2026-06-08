@@ -86,7 +86,7 @@ jobs:
             TAG="${pkg_name}@${VERSION}"
             echo "Creating tag: $TAG"
             if ! git rev-parse "$TAG" >/dev/null 2>&1; then
-              git tag -a "$TAG" -m "Release $VERSION"
+              git tag -a "$TAG" "${{ github.sha }}" -m "Release $VERSION"
               git push origin "$TAG"
             else
               echo "Tag $TAG already exists, skipping"
