@@ -11,6 +11,8 @@ if platform.system() == "Windows":
 else:
     import healpy as hp
 
+from torch_so3.hierarchical_s2_grid import HierarchicalS2Grid
+
 
 def uniform_base_grid(
     theta_step: float = 2.5,
@@ -103,6 +105,16 @@ def _nside_from_theta_step(theta_step: float) -> int:
     estimated_num_pixels = int(4 * np.pi / (theta_step_rad**2))
     nside = int(np.ceil(np.sqrt(estimated_num_pixels / 12)))
     return nside
+
+
+def _is_power_of_two(n: int) -> bool:
+    """Check whether ``n`` is a positive power of two."""
+    return n >= 1 and (n & (n - 1)) == 0
+
+
+def _next_power_of_two_ge(n: int) -> int:
+    """Smallest power of two that is >= ``n`` (``n`` must be >= 1)."""
+    return 1 << (n - 1).bit_length()
 
 
 def healpix_base_grid(
@@ -198,11 +210,12 @@ def healpix_sectored_base_grid(
     Parameters
     ----------
     nside_coarse : int
-        HEALPix ``nside`` for the coarse sector grid. Must be >= 1.
+        HEALPix ``nside`` for the coarse sector grid. Must be a power of two >= 1.
         ``n_sectors = 12 * nside_coarse**2``.
     nside_fine : int, optional
-        HEALPix ``nside`` for the fine sampling inside each sector.  Must be >=
-        ``nside_coarse``.  If ``None``, inferred from ``theta_step``.
+        HEALPix ``nside`` for the fine sampling inside each sector.  Must be a power
+        of two >= ``nside_coarse``.  If ``None``, inferred from ``theta_step`` and
+        rounded up to the nearest power of two.
     theta_step : float, optional
         Angular step in degrees used to infer ``nside_fine`` when ``nside_fine`` is
         ``None``.  Ignored if ``nside_fine`` is provided.  Default is 2.5.
@@ -222,13 +235,20 @@ def healpix_sectored_base_grid(
         raise ImportError("healpy cannot be installed on Windows systems.")
 
     nside_coarse = int(nside_coarse)
-    if nside_coarse < 1:
-        raise ValueError(f"nside_coarse must be >= 1, got {nside_coarse!r}.")
+    if not _is_power_of_two(nside_coarse):
+        raise ValueError(
+            f"nside_coarse must be a power of 2 and >= 1, got {nside_coarse!r}."
+        )
 
     if nside_fine is not None:
         nside_fine = int(nside_fine)
+        if not _is_power_of_two(nside_fine):
+            raise ValueError(
+                f"nside_fine must be a power of 2 and >= 1, got {nside_fine!r}."
+            )
     else:
-        nside_fine = _nside_from_theta_step(theta_step)
+        target_nside = _nside_from_theta_step(theta_step)
+        nside_fine = max(nside_coarse, _next_power_of_two_ge(target_nside))
 
     if nside_fine < nside_coarse:
         raise ValueError(
@@ -239,31 +259,44 @@ def healpix_sectored_base_grid(
     n_fine_total = 12 * nside_fine**2
     k2 = n_fine_total // n_sectors  # exact because HEALPix is equal-area
 
-    # Centre angles of every fine pixel
-    fine_pix = np.arange(n_fine_total, dtype=np.int64)
-    fine_theta_rad, fine_phi_rad = hp.pix2ang(nside_fine, fine_pix)
+    # depth_diff levels separate the coarse sector grid from the fine grid
+    depth_diff = int(np.log2(nside_fine // nside_coarse))
+    grid = HierarchicalS2Grid(nside_finest=nside_fine, n_levels=depth_diff + 1)
 
-    # Assign each fine pixel to its coarse sector
-    coarse_assignments = hp.ang2pix(nside_coarse, fine_theta_rad, fine_phi_rad)
+    # Fine-pixel (NESTED) indices belonging to each coarse sector, in sector order
+    coarse_ipix = np.arange(n_sectors, dtype=np.int64)
+    fine_ipix = grid.convert_index(
+        coarse_ipix,
+        from_level=grid.coarsest_level,
+        to_level=grid.finest_level,
+    )
+    fine_ipix = fine_ipix.reshape(n_sectors, k2)
 
-    phi_deg = np.rad2deg(fine_phi_rad)
-    theta_deg = np.rad2deg(fine_theta_rad)
+    theta_deg, phi_deg = grid.angle_from_index(
+        fine_ipix.reshape(-1), level=grid.finest_level, degrees=True
+    )
+    theta_deg = theta_deg.reshape(n_sectors, k2)
+    phi_deg = phi_deg.reshape(n_sectors, k2)
 
-    kept = []
+    # Non-vectorized filtering since arrays can be extremely large
+    kept_phi = []
+    kept_theta = []
     for ipix_c in range(n_sectors):
-        mask = coarse_assignments == ipix_c
-        p = phi_deg[mask]
-        t = theta_deg[mask]
-        in_range = (t >= theta_min) & (t <= theta_max) & (p >= phi_min) & (p <= phi_max)
-        if np.any(in_range):
-            kept.append(np.stack([p, t], axis=-1))
+        if np.any(
+            (theta_deg[ipix_c] >= theta_min)
+            & (theta_deg[ipix_c] <= theta_max)
+            & (phi_deg[ipix_c] >= phi_min)
+            & (phi_deg[ipix_c] <= phi_max)
+        ):
+            kept_phi.append(phi_deg[ipix_c])
+            kept_theta.append(theta_deg[ipix_c])
 
-    if not kept:
-        empty = np.empty((0, k2, 2), dtype=np.float64)
-        return torch.tensor(empty, dtype=torch.float64)
+    if not kept_phi:  # no sectors qualified
+        return torch.empty((0, k2, 2), dtype=torch.float64)
 
-    angle_pairs = np.stack(kept, axis=0)
-
+    angle_pairs = np.stack(
+        [np.stack(kept_phi, axis=0), np.stack(kept_theta, axis=0)], axis=-1
+    )
     return torch.tensor(angle_pairs, dtype=torch.float64)
 
 
