@@ -1,23 +1,159 @@
 """Estimate local motion using a deformation field."""
 
-from collections.abc import Callable
+import random
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from typing import Any, cast
 
 import einops
 import torch
 import torch.utils.checkpoint as checkpoint
 import tqdm
+from torch_fourier_rescale import fourier_rescale_2d
 from torch_fourier_shift import fourier_shift_dft_2d
 
 from torch_motion_correction.deformation_field import DeformationField
 from torch_motion_correction.optimization_state import OptimizationTracker
-from torch_motion_correction.patch_utils import ImagePatchIterator
 from torch_motion_correction.types import (
     FourierFilterConfig,
     OptimizationConfig,
     PatchSamplingConfig,
 )
 from torch_motion_correction.utils import normalize_image, prepare_patch_filters
+
+
+@dataclass
+class _PrecomputedPatchState:
+    """Iteration-invariant state prepared once before the optimization loop."""
+
+    new_deformation_field: DeformationField
+    base_deformation_field: DeformationField
+    cached_fft: torch.Tensor  # (n_patches, t, ph, pw//2+1)
+    centers_norm: torch.Tensor  # (t, n_patches, 3)
+    base_shifts_cache: torch.Tensor  # (t, n_patches, 2), detached
+    b_factor_envelope: torch.Tensor | None  # (ph, pw//2+1)
+    bandpass_filter: torch.Tensor | None  # (ph, pw//2+1)
+    pixel_spacing: float  # possibly Fourier-cropped
+    ph: int  # possibly Fourier-cropped
+    pw: int  # possibly Fourier-cropped
+
+
+def _prepare_patch_state(
+    image: torch.Tensor,  # (t, H, W)
+    pixel_spacing: float,
+    deformation_field_resolution: tuple[int, int, int],
+    patch_sampling: PatchSamplingConfig,
+    fourier_filter: FourierFilterConfig,
+    grid_type: str,
+    initial_deformation_field: DeformationField | None,
+    device: torch.device,
+) -> _PrecomputedPatchState:
+    """Extract, mask, Fourier-crop, and cache all patches once.
+
+    Notes
+    -----
+    Move is static across entire optimization which means patch extraction plus any
+    masking and filtering operations can happen once rather than within optimization
+    loop. Additionally, band-pass filtering zeros many pixels in Fourier space. Can crop
+    down to new resolution (``fourier_filter.frequency_range[1]``) without losing any
+    information to dramatically speed up per-iteration work.
+
+    Parameters
+    ----------
+    image : torch.Tensor
+        (t, H, W) movie, already moved to ``device``. Normalized internally.
+    pixel_spacing : float
+        Pixel spacing in Angstroms.
+    deformation_field_resolution : tuple[int, int, int]
+        Resolution of the deformation field (nt, nh, nw).
+    patch_sampling : PatchSamplingConfig
+        Patch extraction configuration.
+    fourier_filter : FourierFilterConfig
+        Fourier-space filtering parameters (b_factor and frequency_range).
+    grid_type : str
+        Cubic spline interpolation type for the deformation field.
+    initial_deformation_field : DeformationField | None
+        Initial deformation field to start from. If None, initializes to zero.
+    device : torch.device
+        Device to perform computation on.
+
+    Returns
+    -------
+    _PrecomputedPatchState
+        Bundle of precomputed, iteration-invariant tensors and the two
+        deformation fields (frozen base + optimizable increment).
+    """
+    patch_shape = patch_sampling.patch_shape
+    ph, pw = patch_shape
+
+    image = normalize_image(image)
+    image_patch_iterator = patch_sampling.get_patch_iterator(image=image, device=device)
+
+    new_deformation_field, base_deformation_field = DeformationField.from_initial_field(
+        resolution=deformation_field_resolution,
+        initial_field=initial_deformation_field,
+        grid_type=grid_type,
+        device=device,
+    )
+
+    # Real-space apodization mask at full (uncropped) resolution
+    circle_mask, _, _ = prepare_patch_filters(
+        shape=patch_shape,
+        pixel_spacing=pixel_spacing,
+        fourier_filter=fourier_filter,
+        mask_smoothing_fraction=1.0,  # optimizer historically uses radius == smoothing
+        device=device,
+    )
+
+    n_patches = (
+        image_patch_iterator.control_points.shape[1]
+        * image_patch_iterator.control_points.shape[2]
+    )
+    all_patches, all_centers_norm = next(
+        iter(image_patch_iterator.get_iterator(batch_size=n_patches, randomized=False))
+    )  # (n_patches, t, ph, pw), (t, n_patches, 3)
+    masked_patches = all_patches * circle_mask
+
+    # Find maximum resolution in the band-pass filter to re-scale patches
+    crop_pixel_spacing = fourier_filter.frequency_range[1] / 2
+    if crop_pixel_spacing > pixel_spacing:
+        cached_patches, new_spacing = fourier_rescale_2d(
+            masked_patches,
+            source_spacing=pixel_spacing,
+            target_spacing=crop_pixel_spacing,
+        )
+        ph_eff, pw_eff = cached_patches.shape[-2:]
+        pixel_spacing_eff = new_spacing[0]
+    else:
+        cached_patches = masked_patches
+        ph_eff, pw_eff = ph, pw
+        pixel_spacing_eff = pixel_spacing
+
+    # Fourier filters, rebuilt at the (possibly cropped) resolution/spacing.
+    _, b_factor_envelope, bandpass_filter = prepare_patch_filters(
+        shape=(ph_eff, pw_eff),
+        pixel_spacing=pixel_spacing_eff,
+        fourier_filter=fourier_filter,
+        mask_smoothing_fraction=1.0,
+        device=device,
+    )
+
+    cached_fft = torch.fft.rfftn(cached_patches, dim=(-2, -1))
+    with torch.no_grad():
+        base_shifts_cache = base_deformation_field(all_centers_norm).detach()
+
+    return _PrecomputedPatchState(
+        new_deformation_field=new_deformation_field,
+        base_deformation_field=base_deformation_field,
+        cached_fft=cached_fft,
+        centers_norm=all_centers_norm,
+        base_shifts_cache=base_shifts_cache,
+        b_factor_envelope=b_factor_envelope,
+        bandpass_filter=bandpass_filter,
+        pixel_spacing=pixel_spacing_eff,
+        ph=ph_eff,
+        pw=pw_eff,
+    )
 
 
 def estimate_local_motion(
@@ -72,10 +208,6 @@ def estimate_local_motion(
         optimization = OptimizationConfig()
 
     # Deconstruct config objects
-    patch_shape = patch_sampling.patch_shape
-    ph, pw = patch_shape
-    # b_factor = fourier_filter.b_factor
-    # frequency_range = fourier_filter.frequency_range
     max_iterations = optimization.max_iterations
     optimizer_type = optimization.optimizer_type
     loss_type = optimization.loss_type
@@ -91,27 +223,20 @@ def estimate_local_motion(
     trajectory_kwargs.setdefault("total_steps", max_iterations)
     trajectory = OptimizationTracker(**trajectory_kwargs)
 
-    # Normalize image based on stats from central 50% of image
-    image = normalize_image(image)
-
-    # Create the patch grid via PatchSamplingConfig
-    image_patch_iterator = patch_sampling.get_patch_iterator(image=image, device=device)
-
-    new_deformation_field, deformation_field = DeformationField.from_initial_field(
-        resolution=deformation_field_resolution,
-        initial_field=initial_deformation_field,
-        grid_type=grid_type,
-        device=device,
-    )
-
-    # Reusable masks and Fourier filters
-    circle_mask, b_factor_envelope, bandpass_filter = prepare_patch_filters(
-        shape=patch_shape,
+    # NOTE: All patch extraction, masking, Fourier-cropping, and filter/cache setup is
+    # iteration-invariant, so compute once into data object
+    state = _prepare_patch_state(
+        image=image,
         pixel_spacing=pixel_spacing,
+        deformation_field_resolution=deformation_field_resolution,
+        patch_sampling=patch_sampling,
         fourier_filter=fourier_filter,
-        mask_smoothing_fraction=1.0,  # optimizer historically uses radius == smoothing
+        grid_type=grid_type,
+        initial_deformation_field=initial_deformation_field,
         device=device,
     )
+    new_deformation_field = state.new_deformation_field
+    deformation_field = state.base_deformation_field
 
     motion_optimizer = _setup_optimizer(
         optimizer_type=optimizer_type,
@@ -136,20 +261,20 @@ def estimate_local_motion(
 
     # Helper inner function to to have all other arguments fixed
     def process_batch(
-        patch_batch: torch.Tensor,
+        fft_batch: torch.Tensor,
         patch_batch_centers: torch.Tensor,
+        base_shifts_batch: torch.Tensor,
     ) -> torch.Tensor:
         return _process_patch_batch(
-            patch_batch=patch_batch,
+            fft_batch=fft_batch,
             patch_batch_centers=patch_batch_centers,
-            circle_mask=circle_mask,
-            b_factor_envelope=b_factor_envelope,
-            bandpass=bandpass_filter,
-            base_deformation_field=deformation_field,
+            base_shifts_batch=base_shifts_batch,
+            b_factor_envelope=state.b_factor_envelope,
+            bandpass=state.bandpass_filter,
             new_deformation_field=new_deformation_field,
-            pixel_spacing=pixel_spacing,
-            ph=ph,
-            pw=pw,
+            pixel_spacing=state.pixel_spacing,
+            ph=state.ph,
+            pw=state.pw,
             loss_type=loss_type,
             t=t,
         )
@@ -161,7 +286,9 @@ def estimate_local_motion(
         if optimizer_type.lower() == "lbfgs":
             avg_loss = _run_lbfgs_step(
                 motion_optimizer=motion_optimizer,
-                image_patch_iterator=image_patch_iterator,
+                cached_fft=state.cached_fft,
+                centers_norm=state.centers_norm,
+                base_shifts_cache=state.base_shifts_cache,
                 process_batch_fn=process_batch,
                 lbfgs_patch_subsample=lbfgs_patch_subsample,
                 use_checkpointing=use_checkpointing,
@@ -170,7 +297,9 @@ def estimate_local_motion(
         else:
             avg_loss = _run_standard_step(
                 motion_optimizer=motion_optimizer,
-                image_patch_iterator=image_patch_iterator,
+                cached_fft=state.cached_fft,
+                centers_norm=state.centers_norm,
+                base_shifts_cache=state.base_shifts_cache,
                 process_batch_fn=process_batch,
             )
 
@@ -198,12 +327,11 @@ def estimate_local_motion(
 
 
 def _process_patch_batch(
-    patch_batch: torch.Tensor,
+    fft_batch: torch.Tensor,
     patch_batch_centers: torch.Tensor,
-    circle_mask: torch.Tensor,
+    base_shifts_batch: torch.Tensor,
     b_factor_envelope: torch.Tensor,
     bandpass: torch.Tensor,
-    base_deformation_field: DeformationField,
     new_deformation_field: DeformationField,
     pixel_spacing: float,
     ph: int,
@@ -211,30 +339,30 @@ def _process_patch_batch(
     loss_type: str,
     t: int,
 ) -> torch.Tensor:
-    """Apply mask, FFT, shift-predict, assemble reference, and compute loss.
+    """Shift-predict, filter, assemble reference, and compute loss for a batch.
 
     Parameters
     ----------
-    patch_batch : torch.Tensor
-        (b, t, ph, pw) real-space image patches.
+    fft_batch : torch.Tensor
+        (b, t, ph, pw//2+1) rFFT of masked (and possibly resolution-cropped) patches,
+        precomputed once.
     patch_batch_centers : torch.Tensor
-        (b, t, 3) normalized (t, y, x) coordinates of each patch center.
-    circle_mask : torch.Tensor
-        (ph, pw) real-space circular apodisation mask.
+        (t, b, 3) normalized (t, y, x) coordinates of each patch center.
+    base_shifts_batch : torch.Tensor
+        (t, b, 2) frozen base deformation field shifts in Angstroms, precomputed once
+        and detached.
     b_factor_envelope : torch.Tensor
         (ph, pw//2+1) rFFT-space B-factor envelope.
     bandpass : torch.Tensor
         (ph, pw//2+1) rFFT-space bandpass filter.
-    base_deformation_field : DeformationField
-        Frozen initial deformation field.
     new_deformation_field : DeformationField
         Optimisable deformation field increment.
     pixel_spacing : float
-        Pixel spacing in Angstroms.
+        Pixel spacing in Angstroms (of the, possibly cropped, patches).
     ph : int
-        Patch height in pixels.
+        Patch height in pixels (possibly cropped).
     pw : int
-        Patch width in pixels.
+        Patch width in pixels (possibly cropped).
     loss_type : str
         Loss function name ("mse", "ncc", or "cc").
     t : int
@@ -245,19 +373,24 @@ def _process_patch_batch(
     torch.Tensor
         Scalar loss value.
     """
-    patch_batch_fft = torch.fft.rfftn(patch_batch * circle_mask, dim=(-2, -1))
-
-    shifted_patches, _ = _compute_shifted_patches_and_shifts(
-        initial_deformation_field=base_deformation_field,
-        new_deformation_field=new_deformation_field,
-        patch_batch=patch_batch_fft,
-        patch_batch_centers=patch_batch_centers,
-        pixel_spacing=pixel_spacing,
-        ph=ph,
-        pw=pw,
-        b_factor_envelope=b_factor_envelope,
-        bandpass=bandpass,
+    predicted_shifts = -1 * (
+        new_deformation_field(patch_batch_centers) + base_shifts_batch
     )
+    predicted_shifts = einops.rearrange(predicted_shifts, "b t yx -> t b yx")
+    predicted_shifts_px = predicted_shifts / pixel_spacing
+
+    shifted_patches = fourier_shift_dft_2d(
+        dft=fft_batch,
+        image_shape=(ph, pw),
+        shifts=predicted_shifts_px,
+        rfft=True,
+        fftshifted=False,
+    )  # (b, t, ph, pw//2 + 1)
+
+    if bandpass is not None:
+        shifted_patches = shifted_patches * bandpass
+    if b_factor_envelope is not None:
+        shifted_patches = shifted_patches * b_factor_envelope
 
     total_sum = torch.sum(shifted_patches, dim=1, keepdim=True)
     if t > 1:
@@ -270,9 +403,49 @@ def _process_patch_batch(
     )
 
 
+def _iterate_cached_batches(
+    cached_fft: torch.Tensor,
+    centers_norm: torch.Tensor,
+    base_shifts_cache: torch.Tensor,
+    batch_size: int,
+    randomized: bool = True,
+) -> Iterator[tuple[torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Yield mini-batches from precomputed, cached per-patch tensors.
+
+    Parameters
+    ----------
+    cached_fft : torch.Tensor
+        (n_patches, t, ph, pw//2+1) rFFT of masked (and possibly resolution-cropped)
+        patches.
+    centers_norm : torch.Tensor
+        (t, n_patches, 3) normalized (t, y, x) patch center coordinates.
+    base_shifts_cache : torch.Tensor
+        (t, n_patches, 2) frozen base deformation field shifts, detached.
+    batch_size : int
+        Number of patches per mini-batch.
+    randomized : bool
+        Whether to shuffle patch order. Default is True.
+
+    Yields
+    ------
+    tuple[torch.Tensor, torch.Tensor, torch.Tensor]
+        (fft_batch, centers_batch, base_shifts_batch) with shapes (b, t, ph, pw//2+1),
+        (t, b, 3), and (t, b, 2) respectively.
+    """
+    n_patches = cached_fft.shape[0]
+    indices = list(range(n_patches))
+    if randomized:
+        random.shuffle(indices)
+    for i in range(0, n_patches, batch_size):
+        idx = indices[i : i + batch_size]
+        yield cached_fft[idx], centers_norm[:, idx], base_shifts_cache[:, idx]
+
+
 def _run_lbfgs_step(
     motion_optimizer: torch.optim.LBFGS,
-    image_patch_iterator: ImagePatchIterator,
+    cached_fft: torch.Tensor,
+    centers_norm: torch.Tensor,
+    base_shifts_cache: torch.Tensor,
     process_batch_fn: Callable,
     lbfgs_patch_subsample: int | None,
     use_checkpointing: bool,
@@ -284,8 +457,12 @@ def _run_lbfgs_step(
     ----------
     motion_optimizer : torch.optim.LBFGS
         The LBFGS optimizer.
-    image_patch_iterator : ImagePatchIterator
-        Iterator that yields (patch_batch, patch_centers) mini-batches.
+    cached_fft : torch.Tensor
+        (n_patches, t, ph, pw//2+1) precomputed rFFT of masked patches.
+    centers_norm : torch.Tensor
+        (t, n_patches, 3) normalized patch center coordinates.
+    base_shifts_cache : torch.Tensor
+        (t, n_patches, 2) frozen base deformation field shifts, detached.
     process_batch_fn : Callable
         Partially-applied ``_process_patch_batch`` with all frozen args bound.
     lbfgs_patch_subsample : int | None
@@ -306,19 +483,24 @@ def _run_lbfgs_step(
         motion_optimizer.zero_grad()
         weighted_loss_sum = None
         n_batches = 0
-        iterator = image_patch_iterator.get_iterator(batch_size=1, randomized=True)
-        for idx, (patch_batch, patch_batch_centers) in enumerate(iterator):
+        iterator = _iterate_cached_batches(
+            cached_fft, centers_norm, base_shifts_cache, batch_size=1, randomized=True
+        )
+        for idx, (fft_batch, centers_batch, base_shifts_batch) in enumerate(iterator):
             if lbfgs_patch_subsample is not None and idx >= lbfgs_patch_subsample:
                 break
             if use_checkpointing:
                 batch_loss = checkpoint.checkpoint(
                     process_batch_fn,
-                    patch_batch,
-                    patch_batch_centers,
+                    fft_batch,
+                    centers_batch,
+                    base_shifts_batch,
                     use_reentrant=False,
                 )
             else:
-                batch_loss = process_batch_fn(patch_batch, patch_batch_centers)
+                batch_loss = process_batch_fn(
+                    fft_batch, centers_batch, base_shifts_batch
+                )
 
             weighted_loss_sum = (
                 batch_loss
@@ -344,7 +526,9 @@ def _run_lbfgs_step(
 
 def _run_standard_step(
     motion_optimizer: torch.optim.Optimizer,
-    image_patch_iterator: ImagePatchIterator,
+    cached_fft: torch.Tensor,
+    centers_norm: torch.Tensor,
+    base_shifts_cache: torch.Tensor,
     process_batch_fn: Callable,
 ) -> float:
     """Execute one gradient-accumulation step for Adam/SGD/RMSprop.
@@ -353,8 +537,12 @@ def _run_standard_step(
     ----------
     motion_optimizer : torch.optim.Optimizer
         The optimizer (Adam, SGD, or RMSprop).
-    image_patch_iterator : ImagePatchIterator
-        Iterator that yields (patch_batch, patch_centers) mini-batches.
+    cached_fft : torch.Tensor
+        (n_patches, t, ph, pw//2+1) precomputed rFFT of masked patches.
+    centers_norm : torch.Tensor
+        (t, n_patches, 3) normalized patch center coordinates.
+    base_shifts_cache : torch.Tensor
+        (t, n_patches, 2) frozen base deformation field shifts, detached.
     process_batch_fn : Callable
         Partially-applied ``_process_patch_batch`` with all frozen args bound.
 
@@ -363,88 +551,22 @@ def _run_standard_step(
     float
         Average per-batch loss for this step.
     """
-    patch_iter = image_patch_iterator.get_iterator(batch_size=8)  # TODO: expose
+    patch_iter = _iterate_cached_batches(
+        cached_fft,
+        centers_norm,
+        base_shifts_cache,
+        batch_size=8,  # TODO: expose
+    )
     total_loss = 0.0
     n_batches = 0
-    for patch_batch, patch_batch_centers in patch_iter:
-        loss = process_batch_fn(patch_batch, patch_batch_centers)
+    for fft_batch, centers_batch, base_shifts_batch in patch_iter:
+        loss = process_batch_fn(fft_batch, centers_batch, base_shifts_batch)
         loss.backward()
         total_loss += loss.item()
         n_batches += 1
     motion_optimizer.step()
     motion_optimizer.zero_grad()
     return total_loss / n_batches if n_batches > 0 else 0.0
-
-
-def _compute_shifted_patches_and_shifts(
-    initial_deformation_field: DeformationField,
-    new_deformation_field: DeformationField,
-    patch_batch: torch.Tensor,
-    patch_batch_centers: torch.Tensor,
-    pixel_spacing: float,
-    ph: int,
-    pw: int,
-    b_factor_envelope: torch.Tensor = None,
-    bandpass: torch.Tensor = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Compute the forward pass for motion estimation for a batch of patches.
-
-    Parameters
-    ----------
-    initial_deformation_field : DeformationField
-        The deformation field model to predict shifts.
-    new_deformation_field : DeformationField
-        The new deformation field model to predict shifts.
-    patch_batch : torch.Tensor
-        A batch of image patches in Fourier space with shape (b, t, ph, pw).
-    patch_batch_centers : torch.Tensor
-        Normalized control point centers for the batch with shape (b, t, 3).
-    pixel_spacing : float
-        Pixel spacing in Angstroms.
-    ph : int
-        Patch height in pixels.
-    pw : int
-        Patch width in pixels.
-    b_factor_envelope : torch.Tensor | None
-        The B-factor envelope to apply in Fourier space with shape (ph, pw//2 + 1).
-        If None, no envelope is applied.
-    bandpass : torch.Tensor | None
-        The bandpass filter to apply in Fourier space with shape (ph, pw//2 + 1).
-        If None, no bandpass is applied.
-
-    Returns
-    -------
-    tuple[torch.Tensor, torch.Tensor]
-        A tuple containing:
-        - shifted_patches: The shifted patches after applying predicted shifts and
-          filters, with shape (b, t, ph, pw//2 + 1).
-        - predicted_shifts: The predicted shifts from the deformation field,
-          with shape (b, t, 2).
-    """
-    predicted_shifts = -1 * (
-        new_deformation_field(patch_batch_centers)
-        + initial_deformation_field(patch_batch_centers).detach()
-    )
-    predicted_shifts = einops.rearrange(predicted_shifts, "b t yx -> t b yx")
-    predicted_shifts_px = predicted_shifts / pixel_spacing
-
-    # Shift the patches by the predicted shifts
-    shifted_patches = fourier_shift_dft_2d(
-        dft=patch_batch,
-        image_shape=(ph, pw),
-        shifts=predicted_shifts_px,
-        rfft=True,
-        fftshifted=False,
-    )  # (b, t, ph, pw//2 + 1)
-
-    # Apply Fourier filters
-    if bandpass is not None:
-        shifted_patches = shifted_patches * bandpass
-
-    if b_factor_envelope is not None:
-        shifted_patches = shifted_patches * b_factor_envelope
-
-    return shifted_patches, predicted_shifts
 
 
 def _setup_optimizer(

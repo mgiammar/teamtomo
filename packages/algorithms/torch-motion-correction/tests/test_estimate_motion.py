@@ -270,6 +270,18 @@ class TestEstimateLocalMotion:
             )
             assert result.shape == (2, sample_image.shape[0], 2, 2)
 
+    def test_lbfgs_optimizer(self, sample_image, pixel_spacing):
+        """Test the LBFGS optimizer path (uses a separate closure/batching path)."""
+        result, _ = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(max_iterations=2, optimizer_type="lbfgs"),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+
     def test_different_grid_types(self, sample_image, pixel_spacing):
         """Test different grid types via OptimizationConfig."""
         for grid_type in ["catmull_rom", "bspline"]:
@@ -388,3 +400,79 @@ class TestComputeLossIrfftLinearity:
         assert shifted.grad is not None
         assert torch.isfinite(shifted.grad).all()
         assert shifted.grad.abs().sum() > 0
+
+
+class TestFourierResolutionCropping:
+    """Regression tests for cropping patches to the bandpass's resolution cutoff."""
+
+    def test_crop_applied_by_default_still_converges(self, sample_image, pixel_spacing):
+        """Default FourierFilterConfig (frequency_range=(300, 10)) at
+        pixel_spacing=1.0 triggers cropping (crop spacing 5.0 > 1.0). Optimization
+        should still reduce loss on an image with injected motion.
+        """
+        result, tracker = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            optimization=OptimizationConfig(
+                max_iterations=15, loss_type="ncc", optimizer_kwargs={"lr": 0.05}
+            ),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+        losses = [cp.loss for cp in tracker.checkpoints]
+        assert losses[-1] < losses[0]
+
+    def test_crop_skipped_when_not_beneficial(self, sample_image, pixel_spacing):
+        """A tight frequency_range whose resolution cutoff is finer than the
+        native pixel spacing must not trigger cropping (crop_pixel_spacing <
+        pixel_spacing), and optimization should still work.
+        """
+        result, _ = estimate_local_motion(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            deformation_field_resolution=(sample_image.shape[0], 2, 2),
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            fourier_filter=FourierFilterConfig(frequency_range=(300, 1.0)),
+            optimization=OptimizationConfig(max_iterations=2),
+            device=torch.device("cpu"),
+        )
+        assert result.shape == (2, sample_image.shape[0], 2, 2)
+
+    def test_cropped_and_uncropped_give_similar_final_field(
+        self, sample_image, pixel_spacing
+    ):
+        """Sanity check that cropping doesn't change *what* is being optimized:
+        a run with cropping disabled (tight frequency_range) and a run with
+        cropping enabled (default range) should converge to roughly the same
+        deformation field on the same synthetic motion.
+        """
+        torch.manual_seed(0)
+        common_kwargs = {
+            "image": sample_image,
+            "pixel_spacing": pixel_spacing,
+            "deformation_field_resolution": (sample_image.shape[0], 2, 2),
+            "patch_sampling": PatchSamplingConfig(patch_shape=(32, 32)),
+            "optimization": OptimizationConfig(
+                max_iterations=25, loss_type="ncc", optimizer_kwargs={"lr": 0.05}
+            ),
+            "device": torch.device("cpu"),
+        }
+
+        torch.manual_seed(0)
+        result_cropped, _ = estimate_local_motion(
+            fourier_filter=FourierFilterConfig(frequency_range=(300, 10)),
+            **common_kwargs,
+        )
+        torch.manual_seed(0)
+        result_uncropped, _ = estimate_local_motion(
+            fourier_filter=FourierFilterConfig(frequency_range=(300, 1.0)),
+            **common_kwargs,
+        )
+
+        # Both should recover a similar overall shift pattern; loose tolerance
+        # since the two runs operate at different effective resolutions.
+        torch.testing.assert_close(
+            result_cropped.data, result_uncropped.data, atol=0.5, rtol=0.5
+        )
