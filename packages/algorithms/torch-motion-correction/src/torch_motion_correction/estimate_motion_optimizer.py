@@ -266,7 +266,7 @@ def _process_patch_batch(
         reference_patches = shifted_patches
 
     return _compute_loss(
-        shifted_patches, reference_patches, ph, pw, loss_type=loss_type
+        shifted_patches, reference_patches, ph, pw, loss_type=loss_type, t=t
     )
 
 
@@ -551,6 +551,7 @@ def _compute_loss(
     ph: int,
     pw: int,
     loss_type: str = "mse",
+    t: int | None = None,
 ) -> torch.Tensor:
     """Compute the loss for a batch of shifted patches and reference patches.
 
@@ -567,42 +568,47 @@ def _compute_loss(
     loss_type : str, optional
         The type of loss to compute. Default is "mse". Other option is
         normalized cross-correlation (ncc).
+    t : int, optional
+        Number of frames. When provided (and > 1) for "ncc"/"cc", real-space reference
+        is derived from the real-space shifted patches as their leave-one-out mean. Only
+        valid when ``reference_patches`` constructed via
+        ``(sum(shifted_patches, dim=1) - shifted_patches) / (t - 1)``. If ``t`` is None,
+        falls back to irfft-ing ``reference_patches`` directly.
     """
     if loss_type == "mse":
         return torch.mean((shifted_patches - reference_patches).abs() ** 2) / (ph * pw)
-    elif loss_type == "ncc":
+    elif loss_type in ("ncc", "cc"):
         # Inputs are in rFFT space with shapes:
         # shifted_patches: (b, t, ph, pw//2 + 1)
         # reference_patches: (b, t, ph, pw//2 + 1)
-        # Convert to real space for NCC computation
         shifted_real = torch.fft.irfftn(shifted_patches, s=(ph, pw), dim=(-2, -1))
-        reference_real = torch.fft.irfftn(reference_patches, s=(ph, pw), dim=(-2, -1))
-        # Compute normalized cross-correlation over spatial dims for each (b, t)
-        eps = 1e-8
-        x = shifted_real  # (b, t, ph, pw)
-        y = reference_real  # (b, t, ph, pw)
-        x_mean = x.mean(dim=(-2, -1), keepdim=True)
-        y_mean = y.mean(dim=(-2, -1), keepdim=True)
-        x_centered = x - x_mean
-        y_centered = y - y_mean
-        numerator = (x_centered * y_centered).sum(dim=(-2, -1))  # (b, t)
-        denom = torch.sqrt(
-            (x_centered.square().sum(dim=(-2, -1)) + eps)
-            * (y_centered.square().sum(dim=(-2, -1)) + eps)
-        )
-        ncc = numerator / denom  # (b, t)
-        return -ncc.mean()
-    elif loss_type == "cc":
-        # Inputs are in rFFT space with shapes:
-        # shifted_patches: (b, t, ph, pw//2 + 1)
-        # reference_patches: (b, t, ph, pw//2 + 1)
-        # Convert to real space for CC computation
-        shifted_real = torch.fft.irfftn(shifted_patches, s=(ph, pw), dim=(-2, -1))
-        reference_real = torch.fft.irfftn(reference_patches, s=(ph, pw), dim=(-2, -1))
+        if t is not None and t > 1:
+            sum_real = shifted_real.sum(dim=1, keepdim=True)
+            reference_real = (sum_real - shifted_real) / (t - 1)
+        else:
+            reference_real = torch.fft.irfftn(
+                reference_patches, s=(ph, pw), dim=(-2, -1)
+            )
 
-        # Compute unnormalized cross-correlation over spatial dims
-        # (b, t, ph, pw) * (b, t, ph, pw) → (b, t)
-        cc = (shifted_real * reference_real).sum(dim=(-2, -1))
-
-        # Optionally: mean over batch and time; negate to make it a loss
-        return -cc.mean()
+        if loss_type == "ncc":
+            # Compute normalized cross-correlation over spatial dims for each (b, t)
+            eps = 1e-8
+            x = shifted_real  # (b, t, ph, pw)
+            y = reference_real  # (b, t, ph, pw)
+            x_mean = x.mean(dim=(-2, -1), keepdim=True)
+            y_mean = y.mean(dim=(-2, -1), keepdim=True)
+            x_centered = x - x_mean
+            y_centered = y - y_mean
+            numerator = (x_centered * y_centered).sum(dim=(-2, -1))  # (b, t)
+            denom = torch.sqrt(
+                (x_centered.square().sum(dim=(-2, -1)) + eps)
+                * (y_centered.square().sum(dim=(-2, -1)) + eps)
+            )
+            ncc = numerator / denom  # (b, t)
+            return -ncc.mean()
+        else:
+            # Compute unnormalized cross-correlation over spatial dims
+            # (b, t, ph, pw) * (b, t, ph, pw) → (b, t)
+            cc = (shifted_real * reference_real).sum(dim=(-2, -1))
+            # Optionally: mean over batch and time; negate to make it a loss
+            return -cc.mean()

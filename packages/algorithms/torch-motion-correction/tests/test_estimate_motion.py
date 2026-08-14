@@ -4,7 +4,10 @@ import pytest
 import torch
 
 from torch_motion_correction.deformation_field import DeformationField
-from torch_motion_correction.estimate_motion_optimizer import estimate_local_motion
+from torch_motion_correction.estimate_motion_optimizer import (
+    _compute_loss,
+    estimate_local_motion,
+)
 from torch_motion_correction.estimate_motion_xc import (
     estimate_global_motion,
     estimate_motion_cross_correlation_patches,
@@ -334,3 +337,54 @@ class TestEstimateLocalMotion:
             device=torch.device("cpu"),
         )
         assert isinstance(result, DeformationField)
+
+
+class TestComputeLossIrfftLinearity:
+    """Regression tests for the single-irfft ncc/cc path in ``_compute_loss``."""
+
+    @staticmethod
+    def _make_batch(b, t, ph, pw, seed):
+        torch.manual_seed(seed)
+        shifted = torch.randn(b, t, ph, pw // 2 + 1, dtype=torch.complex64)
+        total_sum = shifted.sum(dim=1, keepdim=True)
+        reference = (total_sum - shifted) / (t - 1)
+        return shifted, reference
+
+    @pytest.mark.parametrize("loss_type", ["ncc", "cc"])
+    def test_fast_path_matches_fallback(self, loss_type):
+        b, t, ph, pw = 4, 6, 32, 32
+        shifted, reference = self._make_batch(b, t, ph, pw, seed=0)
+
+        fast = _compute_loss(shifted, reference, ph, pw, loss_type=loss_type, t=t)
+        fallback = _compute_loss(
+            shifted, reference, ph, pw, loss_type=loss_type, t=None
+        )
+        torch.testing.assert_close(fast, fallback, atol=1e-5, rtol=1e-5)
+
+    @pytest.mark.parametrize("loss_type", ["ncc", "cc"])
+    def test_single_frame_edge_case(self, loss_type):
+        # t == 1: reference_patches == shifted_patches, both code paths must agree.
+        b, ph, pw = 4, 32, 32
+        torch.manual_seed(1)
+        shifted = torch.randn(b, 1, ph, pw // 2 + 1, dtype=torch.complex64)
+        reference = shifted
+
+        with_t = _compute_loss(shifted, reference, ph, pw, loss_type=loss_type, t=1)
+        without_t = _compute_loss(
+            shifted, reference, ph, pw, loss_type=loss_type, t=None
+        )
+        torch.testing.assert_close(with_t, without_t, atol=1e-5, rtol=1e-5)
+
+    def test_gradients_flow_through_fast_path(self):
+        b, t, ph, pw = 4, 6, 32, 32
+        shifted, _ = self._make_batch(b, t, ph, pw, seed=2)
+        shifted.requires_grad_(True)
+        total_sum = shifted.sum(dim=1, keepdim=True)
+        reference = (total_sum - shifted) / (t - 1)
+
+        loss = _compute_loss(shifted, reference, ph, pw, loss_type="ncc", t=t)
+        loss.backward()
+
+        assert shifted.grad is not None
+        assert torch.isfinite(shifted.grad).all()
+        assert shifted.grad.abs().sum() > 0

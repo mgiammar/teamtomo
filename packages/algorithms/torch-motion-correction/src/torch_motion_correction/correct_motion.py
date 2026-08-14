@@ -48,9 +48,15 @@ def correct_motion(
     image = image.to(device)
     deformation_field = deformation_field.to(device)
 
-    t, _, _ = image.shape
+    t, h, w = image.shape
     _, _, gh, gw = deformation_field.data.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
+
+    # Grid depends only on (h, w, device). Compute only once outside per-frame loop.
+    pixel_grid = coordinate_grid(
+        image_shape=(h, w),
+        device=image.device,
+    )  # (h, w, 2) yx coords
 
     # Use conditional gradient context to save memory
     gradient_context = torch.enable_grad() if grad else torch.no_grad()
@@ -65,6 +71,7 @@ def correct_motion(
                     grid_shape=(10 * gh, 10 * gw),
                 ),
                 pixel_spacing=pixel_spacing,
+                pixel_grid=pixel_grid,
             )
             for frame, frame_t in zip(image, normalized_t)
         ]
@@ -76,6 +83,7 @@ def _correct_frame(
     frame: torch.Tensor,
     pixel_spacing: float,
     frame_deformation_grid: torch.Tensor,  # (yx, h, w)
+    pixel_grid: torch.Tensor,
 ) -> torch.Tensor:
     """Correct a single frame using a deformation grid.
 
@@ -87,21 +95,14 @@ def _correct_frame(
         Pixel spacing in Angstroms
     frame_deformation_grid: torch.Tensor
         (yx, h, w) deformation grid
+    pixel_grid: torch.Tensor
+        (h, w, 2) yx pixel coordinate grid.
 
     Returns
     -------
     corrected_frame: torch.Tensor
         (h, w) corrected frame
     """
-    # grab frame and deformation grid dimensions
-    h, w = frame.shape
-
-    # prepare a grid of pixel positions
-    pixel_grid = coordinate_grid(
-        image_shape=(h, w),
-        device=frame.device,
-    )  # (h, w, 2) yx coords
-
     pixel_shifts = get_pixel_shifts(
         frame=frame,
         pixel_spacing=pixel_spacing,
@@ -217,13 +218,19 @@ def correct_motion_two_grids(
     new_deformation_field = new_deformation_field.to(device)
     base_deformation_field = base_deformation_field.to(device)
 
-    t, _, _ = image.shape
+    t, h, w = image.shape
 
     # Derive oversampled grid resolution from the deformation field
     _, _nt, nh, nw = new_deformation_field.data.shape
     gh, gw = nh, nw
 
     normalized_t = torch.linspace(0, 1, steps=t, device=device)
+
+    # Grid depends only on (h, w, device). Compute only once outside per-frame loop.
+    pixel_grid = coordinate_grid(
+        image_shape=(h, w),
+        device=device,
+    )  # (h, w, 2) yx coords
 
     gradient_context = torch.enable_grad() if grad else torch.no_grad()
 
@@ -236,6 +243,7 @@ def correct_motion_two_grids(
                 frame_t=frame_t,
                 grid_shape=(10 * gh, 10 * gw),
                 pixel_spacing=pixel_spacing,
+                pixel_grid=pixel_grid,
             )
             for frame, frame_t in zip(image, normalized_t)
         ]
@@ -252,6 +260,7 @@ def _correct_frame_two_grids(
     frame_t: float,
     grid_shape: tuple[int, int],
     pixel_spacing: float,
+    pixel_grid: torch.Tensor,
 ) -> torch.Tensor:
     """Correct a single frame using two deformation fields.
 
@@ -269,6 +278,8 @@ def _correct_frame_two_grids(
         (h, w) shape of the grid to evaluate at
     pixel_spacing: float
         Pixel spacing in Angstroms
+    pixel_grid: torch.Tensor
+        (h, w, 2) yx pixel coordinate grid.
 
     Returns
     -------
@@ -297,6 +308,7 @@ def _correct_frame_two_grids(
         frame=frame,
         frame_deformation_grid=combined_shifts,
         pixel_spacing=pixel_spacing,
+        pixel_grid=pixel_grid,
     )
 
     return corrected_frame
@@ -333,8 +345,14 @@ def correct_motion_slow(
     image = image.to(device)
     deformation_field = deformation_field.to(device)
 
-    t, _, _ = image.shape
+    t, h, w = image.shape
     normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
+
+    # Grid depends only on (h, w, device). Compute only once outside per-frame loop.
+    pixel_grid = coordinate_grid(
+        image_shape=(h, w),
+        device=image.device,
+    )  # (h, w, 2) yx coords
 
     # Use conditional gradient context to save memory
     gradient_context = torch.enable_grad() if grad else torch.no_grad()
@@ -346,6 +364,7 @@ def correct_motion_slow(
                 frame=frame,
                 deformation_grid=deformation_field.data,
                 t=frame_t,
+                pixel_grid=pixel_grid,
             )
             for frame, frame_t in zip(image, normalized_t)
         ]
@@ -357,6 +376,7 @@ def _correct_frame_slow(
     frame: torch.Tensor,
     deformation_grid: torch.Tensor,
     t: float,  # [0, 1]
+    pixel_grid: torch.Tensor,
 ) -> torch.Tensor:
     """Correct a single frame using a deformation grid.
 
@@ -368,6 +388,8 @@ def _correct_frame_slow(
         (yx, h, w) deformation grid
     t: float
         Timepoint to evaluate at [0, 1]
+    pixel_grid: torch.Tensor
+        (h, w, 2) yx pixel coordinate grid.
 
     Returns
     -------
@@ -376,12 +398,6 @@ def _correct_frame_slow(
     """
     # grab frame dimensions
     h, w = frame.shape
-
-    # prepare a grid of pixel positions
-    pixel_grid = coordinate_grid(
-        image_shape=(h, w),
-        device=frame.device,
-    )  # (h, w, 2) yx coords
 
     dim_lengths = torch.as_tensor(
         [h - 1, w - 1], device=frame.device, dtype=torch.float32

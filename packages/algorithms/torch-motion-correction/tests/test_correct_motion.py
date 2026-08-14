@@ -539,4 +539,74 @@ class TestCorrectMotionTwoGrids:
         # computation graph works correctly
         # Base grid should NOT have gradients (it's detached in the function)
         # The base grid's shifts are detached, so gradients won't flow to it
+
+
+class TestPixelGridHoisting:
+    """Regression tests for hoisting ``coordinate_grid`` out of the per-frame loop."""
+
+    def test_correct_motion_matches_per_frame_grid(
+        self, sample_image, sample_deformation_field, pixel_spacing
+    ):
+        from torch_grid_utils import coordinate_grid
+
+        from torch_motion_correction.correct_motion import _correct_frame
+
+        field = DeformationField(data=sample_deformation_field)
+        t, h, w = sample_image.shape
+        _, _, gh, gw = field.data.shape
+        normalized_t = torch.linspace(0, 1, steps=t)
+
+        # Reference: recompute the pixel grid independently for every frame.
+        expected = torch.stack(
+            [
+                _correct_frame(
+                    frame=frame,
+                    frame_deformation_grid=field.evaluate_at_t(
+                        t=frame_t, grid_shape=(10 * gh, 10 * gw)
+                    ),
+                    pixel_spacing=pixel_spacing,
+                    pixel_grid=coordinate_grid(image_shape=(h, w), device=frame.device),
+                )
+                for frame, frame_t in zip(sample_image, normalized_t)
+            ],
+            dim=0,
+        )
+
+        actual = correct_motion(
+            image=sample_image,
+            deformation_field=field,
+            pixel_spacing=pixel_spacing,
+            device=torch.device("cpu"),
+        )
+        torch.testing.assert_close(actual, expected)
+
+    def test_correct_motion_slow_matches_per_frame_grid(
+        self, sample_image, sample_deformation_field
+    ):
+        from torch_grid_utils import coordinate_grid
+
+        from torch_motion_correction.correct_motion import _correct_frame_slow
+
+        t, h, w = sample_image.shape
+        normalized_t = torch.linspace(0, 1, steps=t)
+
+        expected = torch.stack(
+            [
+                _correct_frame_slow(
+                    frame=frame,
+                    deformation_grid=sample_deformation_field,
+                    t=frame_t,
+                    pixel_grid=coordinate_grid(image_shape=(h, w), device=frame.device),
+                )
+                for frame, frame_t in zip(sample_image, normalized_t)
+            ],
+            dim=0,
+        )
+
+        actual = correct_motion_slow(
+            image=sample_image,
+            deformation_field=DeformationField(data=sample_deformation_field),
+            device=torch.device("cpu"),
+        )
+        torch.testing.assert_close(actual, expected)
         # even if requires_grad was set to True
