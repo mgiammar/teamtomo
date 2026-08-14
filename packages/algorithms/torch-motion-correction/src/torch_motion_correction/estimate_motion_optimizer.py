@@ -38,6 +38,9 @@ class _PrecomputedPatchState:
     pw: int  # possibly Fourier-cropped
 
 
+_PRECOMPUTE_CHUNK_SIZE = 8  # num patches processed per extract/mask/crop/rfft chunk
+
+
 def _prepare_patch_state(
     image: torch.Tensor,  # (t, H, W)
     pixel_spacing: float,
@@ -48,7 +51,7 @@ def _prepare_patch_state(
     initial_deformation_field: DeformationField | None,
     device: torch.device,
 ) -> _PrecomputedPatchState:
-    """Extract, mask, Fourier-crop, and cache all patches once.
+    """Extract, mask, Fourier-crop, and cache all patches once, in small chunks.
 
     Notes
     -----
@@ -105,29 +108,34 @@ def _prepare_patch_state(
         device=device,
     )
 
-    n_patches = (
-        image_patch_iterator.control_points.shape[1]
-        * image_patch_iterator.control_points.shape[2]
-    )
-    all_patches, all_centers_norm = next(
-        iter(image_patch_iterator.get_iterator(batch_size=n_patches, randomized=False))
-    )  # (n_patches, t, ph, pw), (t, n_patches, 3)
-    masked_patches = all_patches * circle_mask
-
-    # Find maximum resolution in the band-pass filter to re-scale patches
     crop_pixel_spacing = fourier_filter.frequency_range[1] / 2
-    if crop_pixel_spacing > pixel_spacing:
-        cached_patches, new_spacing = fourier_rescale_2d(
-            masked_patches,
-            source_spacing=pixel_spacing,
-            target_spacing=crop_pixel_spacing,
-        )
-        ph_eff, pw_eff = cached_patches.shape[-2:]
-        pixel_spacing_eff = new_spacing[0]
+    will_crop = crop_pixel_spacing > pixel_spacing  # Only if crop would reduce size
+    if will_crop:
+        ph_eff = round(ph * pixel_spacing / crop_pixel_spacing)
+        pw_eff = round(pw * pixel_spacing / crop_pixel_spacing)
+        pixel_spacing_eff = pixel_spacing * (ph / ph_eff)
     else:
-        cached_patches = masked_patches
         ph_eff, pw_eff = ph, pw
         pixel_spacing_eff = pixel_spacing
+
+    fft_chunks = []
+    centers_chunks = []
+    chunk_iter = image_patch_iterator.get_iterator(
+        batch_size=_PRECOMPUTE_CHUNK_SIZE, randomized=False
+    )
+    for patch_chunk, centers_chunk in chunk_iter:
+        masked_chunk = patch_chunk * circle_mask
+        if will_crop:
+            cropped_chunk, _ = fourier_rescale_2d(
+                masked_chunk, target_shape=(ph_eff, pw_eff)
+            )
+        else:
+            cropped_chunk = masked_chunk
+        fft_chunks.append(torch.fft.rfftn(cropped_chunk, dim=(-2, -1)))
+        centers_chunks.append(centers_chunk)
+
+    cached_fft = torch.cat(fft_chunks, dim=0)  # (n_patches, t, ph_eff, pw_eff//2+1)
+    all_centers_norm = torch.cat(centers_chunks, dim=1)  # (t, n_patches, 3)
 
     # Fourier filters, rebuilt at the (possibly cropped) resolution/spacing.
     _, b_factor_envelope, bandpass_filter = prepare_patch_filters(
@@ -138,7 +146,6 @@ def _prepare_patch_state(
         device=device,
     )
 
-    cached_fft = torch.fft.rfftn(cached_patches, dim=(-2, -1))
     with torch.no_grad():
         base_shifts_cache = base_deformation_field(all_centers_norm).detach()
 
