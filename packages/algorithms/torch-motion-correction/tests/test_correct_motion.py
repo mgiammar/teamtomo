@@ -117,16 +117,26 @@ class TestCorrectMotion:
     def test_different_devices(
         self, sample_image, sample_deformation_field, pixel_spacing
     ):
-        """Test that device parameter works."""
+        """Test that `device` controls compute location, not output location."""
         if torch.cuda.is_available():
-            corrected = correct_motion(
+            corrected_gpu = correct_motion(
                 image=sample_image,
                 deformation_field=DeformationField(data=sample_deformation_field),
                 pixel_spacing=pixel_spacing,
                 device=torch.device("cuda"),
             )
-            assert corrected.device.type == "cuda"
-            assert corrected.shape == sample_image.shape
+            assert corrected_gpu.device.type == sample_image.device.type == "cpu"
+            assert corrected_gpu.shape == sample_image.shape
+
+            corrected_cpu = correct_motion(
+                image=sample_image,
+                deformation_field=DeformationField(data=sample_deformation_field),
+                pixel_spacing=pixel_spacing,
+                device=torch.device("cpu"),
+            )
+            # Streaming through the GPU must give the same result as computing
+            # entirely on CPU.
+            assert torch.allclose(corrected_gpu, corrected_cpu, atol=1e-4)
         else:
             pytest.skip("CUDA not available")
 

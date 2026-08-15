@@ -23,7 +23,8 @@ def correct_motion(
     Parameters
     ----------
     image: torch.Tensor
-        (t, h, w) array of images to motion correct
+        (t, h, w) array of images to motion correct. May reside on different device than
+        specified compute 'device' (e.g. large super-res movie stored on CPU).
     deformation_field: DeformationField
         Spatiotemporal deformation field with shape (2, nt, nh, nw) in Angstroms.
         The ``grid_type`` attribute of the
@@ -34,37 +35,39 @@ def correct_motion(
     grad: bool
         Whether to enable gradients. Default is False.
     device: torch.device, optional
-        Device for computation. Default is None, which uses the device of the
-        input image.
+        Device for computation. Default is None, which uses the device of the input
+        image.
 
     Returns
     -------
     corrected_frames: torch.Tensor
-        (t, h, w) corrected images
+        (t, h, w) corrected images, on the same device as the input ``image``.
     """
     if device is None:
         device = image.device
 
-    image = image.to(device)
     deformation_field = deformation_field.to(device)
 
     t, h, w = image.shape
     _, _, gh, gw = deformation_field.data.shape
-    normalized_t = torch.linspace(0, 1, steps=t, device=image.device)
+    normalized_t = torch.linspace(0, 1, steps=t, device=device)
 
     # Grid depends only on (h, w, device). Compute only once outside per-frame loop.
     pixel_grid = coordinate_grid(
         image_shape=(h, w),
-        device=image.device,
+        device=device,
     )  # (h, w, 2) yx coords
+
+    corrected_frames = torch.empty((t, h, w), dtype=image.dtype, device=image.device)
 
     # Use conditional gradient context to save memory
     gradient_context = torch.enable_grad() if grad else torch.no_grad()
 
     with gradient_context:
         # correct motion in each frame
-        corrected_frames = [
-            _correct_frame(
+        for frame_idx, frame_t in enumerate(normalized_t):
+            frame = image[frame_idx].to(device)
+            corrected_frame = _correct_frame(
                 frame=frame,
                 frame_deformation_grid=deformation_field.evaluate_at_t(
                     t=frame_t,
@@ -73,10 +76,9 @@ def correct_motion(
                 pixel_spacing=pixel_spacing,
                 pixel_grid=pixel_grid,
             )
-            for frame, frame_t in zip(image, normalized_t)
-        ]
-    corrected_frames = torch.stack(corrected_frames, dim=0).detach()
-    return corrected_frames  # (t, h, w)
+            corrected_frames[frame_idx] = corrected_frame.detach().to(image.device)
+
+    return corrected_frames  # (t, h, w), on image.device
 
 
 def _correct_frame(

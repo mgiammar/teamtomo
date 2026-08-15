@@ -19,7 +19,7 @@ from torch_motion_correction.types import (
     OptimizationConfig,
     PatchSamplingConfig,
 )
-from torch_motion_correction.utils import normalize_image, prepare_patch_filters
+from torch_motion_correction.utils import prepare_patch_filters
 
 
 @dataclass
@@ -64,7 +64,8 @@ def _prepare_patch_state(
     Parameters
     ----------
     image : torch.Tensor
-        (t, H, W) movie, already moved to ``device``. Normalized internally.
+        (t, H, W) movie, already moved to ``device``. Normalized internally, per patch
+        chunk.
     pixel_spacing : float
         Pixel spacing in Angstroms.
     deformation_field_resolution : tuple[int, int, int]
@@ -89,7 +90,13 @@ def _prepare_patch_state(
     patch_shape = patch_sampling.patch_shape
     ph, pw = patch_shape
 
-    image = normalize_image(image)
+    t, h, w = image.shape
+    hl, hu = int(0.25 * h), int(0.75 * h)
+    wl, wu = int(0.25 * w), int(0.75 * w)
+    norm_std, norm_mean = torch.std_mean(image[:, hl:hu, wl:wu], dim=(-3, -2, -1))
+    norm_std = norm_std.to(device)
+    norm_mean = norm_mean.to(device)
+
     image_patch_iterator = patch_sampling.get_patch_iterator(image=image, device=device)
 
     new_deformation_field, base_deformation_field = DeformationField.from_initial_field(
@@ -124,6 +131,8 @@ def _prepare_patch_state(
         batch_size=_PRECOMPUTE_CHUNK_SIZE, randomized=False
     )
     for patch_chunk, centers_chunk in chunk_iter:
+        patch_chunk = patch_chunk.to(device)
+        patch_chunk = (patch_chunk - norm_mean) / norm_std
         masked_chunk = patch_chunk * circle_mask
         if will_crop:
             cropped_chunk, _ = fourier_rescale_2d(
