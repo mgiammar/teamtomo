@@ -185,19 +185,48 @@ class TestCorrectMotionFast:
     def test_different_devices(
         self, sample_image, sample_single_patch_deformation_field
     ):
-        """Test that device parameter works."""
+        """Test that `device` controls compute location, not output location."""
         if torch.cuda.is_available():
-            corrected = correct_motion_fast(
+            corrected_gpu = correct_motion_fast(
                 image=sample_image,
                 deformation_field=DeformationField(
                     data=sample_single_patch_deformation_field
                 ),
                 device=torch.device("cuda"),
             )
-            assert corrected.device.type == "cuda"
-            assert corrected.shape == sample_image.shape
+            assert corrected_gpu.device.type == sample_image.device.type == "cpu"
+            assert corrected_gpu.shape == sample_image.shape
+
+            corrected_cpu = correct_motion_fast(
+                image=sample_image,
+                deformation_field=DeformationField(
+                    data=sample_single_patch_deformation_field
+                ),
+                device=torch.device("cpu"),
+            )
+            # Streaming through the GPU must give the same result as computing
+            # entirely on CPU.
+            assert torch.allclose(corrected_gpu, corrected_cpu, atol=1e-4)
         else:
             pytest.skip("CUDA not available")
+
+    def test_does_not_mutate_input_deformation_field(
+        self, sample_image, sample_single_patch_deformation_field
+    ):
+        """Applying shifts must not flip the sign of the caller's field in place.
+
+        `deformation_field.to(device)` is a no-op (shares storage) when the
+        field is already on `device`, so an in-place negation of the derived
+        shifts would silently corrupt the caller's `DeformationField.data`.
+        """
+        field = DeformationField(data=sample_single_patch_deformation_field.clone())
+        original_data = field.data.clone()
+        correct_motion_fast(
+            image=sample_image,
+            deformation_field=field,
+            device=torch.device("cpu"),
+        )
+        assert torch.equal(field.data, original_data)
 
     def test_zero_deformation_field(self, sample_image):
         """Test with zero deformation field."""

@@ -441,7 +441,8 @@ def correct_motion_fast(
     Parameters
     ----------
     image: torch.Tensor
-        (t, h, w) array of images to motion correct
+        (t, h, w) array of images to motion correct. May reside on a different
+        device than ``device`` (e.g. large super-res movie stored on CPU).
     deformation_field: DeformationField
         Deformation field with shape (2, t, 1, 1) in Angstroms.
     device: torch.device, optional
@@ -452,12 +453,11 @@ def correct_motion_fast(
     Returns
     -------
     corrected_frames: torch.Tensor
-        (t, h, w) corrected images
+        (t, h, w) corrected images, on the same device as the input ``image``.
     """
     if device is None:
         device = image.device
 
-    image = image.to(device)
     deformation_field = deformation_field.to(device)
 
     # Check that deformation field has single patch dimensions
@@ -470,9 +470,12 @@ def correct_motion_fast(
 
     t, h, w = image.shape
 
-    # Extract shifts from deformation field (2, t, 1, 1) -> (t, 2)
-    shifts = einops.rearrange(deformation_field.data, "c t 1 1 -> t c")
-    shifts *= -1  # flip for phase shift
+    # Extract shifts from deformation field (2, t, 1, 1) -> (t, 2). Negation
+    # must be out-of-place: `deformation_field.to(device)` is a no-op (shares
+    # storage with the caller's tensor) when already on `device`, so an
+    # in-place `*= -1` here would silently flip the sign of the caller's
+    # deformation field.
+    shifts = -einops.rearrange(deformation_field.data, "c t 1 1 -> t c")
 
     if verbose:
         print(f"Single patch correction: applying shifts to {t} frames")
@@ -481,16 +484,19 @@ def correct_motion_fast(
             f"x=[{shifts[:, 1].min():.2f}, {shifts[:, 1].max():.2f}] pixels"
         )
 
-    image_fft = torch.fft.rfftn(image, dim=(-2, -1))  # (t, h, w_freq)
+    corrected_frames = torch.empty((t, h, w), dtype=image.dtype, device=image.device)
 
-    shifted_fft = fourier_shift_dft_2d(
-        dft=image_fft,
-        image_shape=(h, w),
-        shifts=shifts,  # (t, 2) shifts
-        rfft=True,
-        fftshifted=False,
-    )
+    for frame_idx in range(t):
+        frame = image[frame_idx].to(device)
+        frame_fft = torch.fft.rfftn(frame, dim=(-2, -1))
+        shifted_fft = fourier_shift_dft_2d(
+            dft=frame_fft,
+            image_shape=(h, w),
+            shifts=shifts[frame_idx],
+            rfft=True,
+            fftshifted=False,
+        )
+        corrected_frame = torch.fft.irfftn(shifted_fft, s=(h, w))
+        corrected_frames[frame_idx] = corrected_frame.to(image.device)
 
-    corrected_frames = torch.fft.irfftn(shifted_fft, s=(h, w))
-
-    return corrected_frames
+    return corrected_frames  # (t, h, w), on image.device
