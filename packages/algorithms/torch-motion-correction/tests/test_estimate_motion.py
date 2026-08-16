@@ -221,6 +221,117 @@ class TestEstimateMotionCrossCorrelationPatches:
         assert isinstance(result_25, DeformationField)
         assert isinstance(result_50, DeformationField)
 
+    @pytest.mark.parametrize(
+        "reference_strategy", ["mean_except_current", "middle_frame"]
+    )
+    def test_different_devices(self, sample_image, pixel_spacing, reference_strategy):
+        """Test that a CPU-resident image can be processed on a CUDA device."""
+        if not torch.cuda.is_available():
+            pytest.skip("CUDA not available")
+
+        assert sample_image.device.type == "cpu"
+        result, patch_positions = estimate_motion_cross_correlation_patches(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            patch_sampling=PatchSamplingConfig(patch_shape=(32, 32)),
+            reference_strategy=reference_strategy,
+            device=torch.device("cuda"),
+        )
+        assert result.data.device.type == "cuda"
+        assert patch_positions is not None
+        assert sample_image.device.type == "cpu"
+
+    def test_mean_except_current_matches_naive_leave_one_out(
+        self, sample_image, pixel_spacing
+    ):
+        """The O(t) precomputed-sum reference must match a naive O(t^2) average.
+
+        Guards the algebraic refactor that derives the leave-one-out reference
+        via `(total - current) / (t - 1)` instead of re-summing the other
+        `t - 1` frames' patches for every frame: computes the naive
+        leave-one-out average directly (independent re-implementation) and
+        compares its cross-correlation peak shifts against the function's
+        output.
+        """
+        import einops
+        from torch_grid_utils.patch_grid import patch_grid_lazy
+
+        from torch_motion_correction.estimate_motion_xc import (
+            _apply_sub_pixel_refinement,
+        )
+        from torch_motion_correction.utils import prepare_patch_filters
+
+        patch_sampling = PatchSamplingConfig(patch_shape=(32, 32))
+        refinement = XCRefinementConfig(
+            temporal_smoothing=False, outlier_rejection=False
+        )
+        fourier_filter = FourierFilterConfig()
+
+        result, _ = estimate_motion_cross_correlation_patches(
+            image=sample_image,
+            pixel_spacing=pixel_spacing,
+            patch_sampling=patch_sampling,
+            reference_strategy="mean_except_current",
+            refinement=refinement,
+            fourier_filter=fourier_filter,
+            device=torch.device("cpu"),
+        )
+
+        # Independent naive re-implementation: re-sum the other t - 1 frames'
+        # patches for every frame instead of using the precomputed total.
+        t, h, w = sample_image.shape
+        ph, pw = patch_sampling.patch_shape
+        hl, hu = int(0.25 * h), int(0.75 * h)
+        wl, wu = int(0.25 * w), int(0.75 * w)
+        norm_std, norm_mean = torch.std_mean(sample_image[:, hl:hu, wl:wu])
+
+        lazy_patch_grid, data_patch_positions = patch_grid_lazy(
+            images=sample_image,
+            patch_shape=(1, ph, pw),
+            patch_step=(1, *patch_sampling.patch_step),
+            distribute_patches=patch_sampling.distribute_patches,
+        )
+        gh, gw = data_patch_positions.shape[1:3]
+        mask, b_factor_envelope, bandpass = prepare_patch_filters(
+            shape=(ph, pw),
+            pixel_spacing=pixel_spacing,
+            fourier_filter=fourier_filter,
+            device=torch.device("cpu"),
+        )
+        combined_filter = bandpass * b_factor_envelope
+
+        def get_patches(idx: int) -> torch.Tensor:
+            patches = lazy_patch_grid[idx]
+            patches = einops.rearrange(patches, "1 gh gw 1 ph pw -> gh gw ph pw")
+            return (patches - norm_mean) / norm_std
+
+        expected_field = torch.zeros((2, t, gh, gw))
+        for frame_idx in range(t):
+            frame_patches = get_patches(frame_idx)
+            others = [get_patches(i) for i in range(t) if i != frame_idx]
+            ref_patches = torch.stack(others, dim=0).sum(dim=0) / (t - 1)
+
+            ref_fft = torch.fft.rfftn(ref_patches * mask, dim=(-2, -1))
+            ref_fft = ref_fft * combined_filter
+            frame_fft = torch.fft.rfftn(frame_patches * mask, dim=(-2, -1))
+            frame_fft = frame_fft * combined_filter
+
+            cross_corr = torch.fft.irfftn(
+                torch.conj(ref_fft) * frame_fft, s=(ph, pw)
+            )
+            cross_corr_flat = cross_corr.view(gh * gw, ph * pw)
+            peak_indices = torch.argmax(cross_corr_flat, dim=1)
+            peak_y, peak_x = _apply_sub_pixel_refinement(
+                cross_corr_flat, peak_indices, ph, pw
+            )
+            shift_y = torch.where(peak_y <= ph // 2, peak_y, peak_y - ph)
+            shift_x = torch.where(peak_x <= pw // 2, peak_x, peak_x - pw)
+            expected_field[0, frame_idx] = shift_y.view(gh, gw) * pixel_spacing
+            expected_field[1, frame_idx] = shift_x.view(gh, gw) * pixel_spacing
+
+        expected_field = expected_field - torch.mean(expected_field)
+        assert torch.allclose(result.data, expected_field, atol=1e-4)
+
 
 class TestEstimateLocalMotion:
     """Tests for estimate_local_motion function."""
