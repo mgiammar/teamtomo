@@ -365,6 +365,140 @@ def dose_weight_movie_memory_efficient_2d(
     return result
 
 
+def dose_weight_normalization_grid(
+    image_shape: tuple[int, int],
+    pixel_size: float,
+    n_frames: int,
+    pre_exposure: float = 0.0,
+    dose_per_frame: float = 1.0,
+    voltage: float = 300.0,
+    crit_exposure_bfactor: int | float = -1,
+    rfft: bool = True,
+    fftshift: bool = False,
+    a: float = 0.245,
+    b: float = -1.665,
+    c: float = 2.81,
+    device: torch.device | None = None,
+    chunk_size: int = 16,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Precompute the per-frequency critical exposure and normalization grids.
+
+    Parameters
+    ----------
+    image_shape : tuple[int, int]
+        The shape of the real space images (h, w).
+    pixel_size : float
+        The pixel size of the images, in Angstroms.
+    n_frames : int
+        The total number of frames in the movie.
+    pre_exposure : float, optional
+        The pre-exposure before the first frame, in e-/A^2. Default is 0.0.
+    dose_per_frame : float, optional
+        The dose per frame, in e-/A^2. Default is 1.0.
+    voltage : float, optional
+        The acceleration voltage in kV. Affects damage correction for 100kV and 200kV.
+        Default is 300.0.
+    crit_exposure_bfactor : int | float, optional
+        The B factor for dose weighting based on critical exposure. If -1,
+        then use Grant and Grigorieff (2015) values. Default is -1.
+    rfft : bool, optional
+        Whether the grid should match a real FFT. Default is True.
+    fftshift : bool, optional
+        Whether the grid should be fftshifted. Default is False.
+    a : float, optional
+        The a parameter for the critical exposure formula. Default is 0.245.
+    b : float, optional
+        The b parameter for the critical exposure formula. Default is -1.665.
+    c : float, optional
+        The c parameter for the critical exposure formula. Default is 2.81.
+    device : torch.device | None, optional
+        The device to compute the grids on. Default is None.
+    chunk_size : int, optional
+        Number of frames' doses to accumulate at a time while summing
+        squared weights across all `n_frames`. Default is 16.
+
+    Returns
+    -------
+    tuple[torch.Tensor, torch.Tensor]
+        `(Ne, normalization)`, each shaped like the frequency grid for
+        `image_shape` (i.e. `(h, w // 2 + 1)` for `rfft=True`). `Ne` is the
+        critical exposure grid; `normalization` is the sqrt of the summed
+        squared weights across all `n_frames`, to be divided into each
+        frame's weight.
+    """
+    frame_indices = torch.arange(n_frames, dtype=torch.float32, device=device)
+    doses = pre_exposure + dose_per_frame * (frame_indices + 1)
+
+    # Apply voltage-dependent damage corrections (follows RELION)
+    if abs(voltage - 200) <= 2:
+        doses = doses / 0.8
+    elif abs(voltage - 100) <= 2:
+        doses = doses / 0.64
+
+    fft_freq_px = fftfreq_grid(
+        image_shape=image_shape,
+        rfft=rfft,
+        fftshift=fftshift,
+        norm=True,
+        device=device,
+    )
+    fft_freq_px /= pixel_size  # Convert to Angstrom^-1
+
+    if crit_exposure_bfactor == -1:
+        Ne = critical_exposure(fft_freq=fft_freq_px, a=a, b=b, c=c)
+    elif crit_exposure_bfactor >= 0:
+        Ne = critical_exposure_bfactor(
+            fft_freq=fft_freq_px, bfactor=crit_exposure_bfactor
+        )
+    else:
+        raise ValueError("B-factor must be positive or -1.")
+
+    # Apply factor of 2 from Eq. 5 (factoring out 0.5)
+    eps = 1e-10
+    Ne = (Ne * 2).clamp(min=eps)
+
+    sum_weight_sq = torch.zeros_like(Ne)
+    for start_idx in range(0, n_frames, chunk_size):
+        end_idx = min(start_idx + chunk_size, n_frames)
+        chunk_doses = doses[start_idx:end_idx]
+        weights = torch.exp(-chunk_doses[:, None, None] / Ne[None])
+        sum_weight_sq += (weights**2).sum(dim=0)
+
+    normalization = torch.sqrt(sum_weight_sq.clamp(min=eps))
+    return Ne, normalization
+
+
+def dose_weight_frame_chunk(
+    chunk_dft: torch.Tensor,
+    frame_start_idx: int,
+    Ne: torch.Tensor,
+    normalization: torch.Tensor,
+    pre_exposure: float = 0.0,
+    dose_per_frame: float = 1.0,
+    voltage: float = 300.0,
+    in_place: bool = False,
+) -> torch.Tensor:
+    """Dose weight one contiguous chunk of a movie's frames' Fourier transforms."""
+    n_chunk = chunk_dft.shape[0]
+    device = chunk_dft.device
+    frame_indices = torch.arange(
+        frame_start_idx, frame_start_idx + n_chunk, dtype=torch.float32, device=device
+    )
+    doses = pre_exposure + dose_per_frame * (frame_indices + 1)
+
+    # Apply voltage-dependent damage corrections (follows RELION)
+    if abs(voltage - 200) <= 2:
+        doses = doses / 0.8
+    elif abs(voltage - 100) <= 2:
+        doses = doses / 0.64
+
+    weights = torch.exp(-doses[:, None, None] / Ne[None]) / normalization[None]
+    if in_place:
+        chunk_dft *= weights
+        return chunk_dft
+    return chunk_dft * weights
+
+
 def dose_weight_movie(
     movie_dft: torch.Tensor,
     image_shape: tuple[int, int],
