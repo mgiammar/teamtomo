@@ -64,8 +64,10 @@ def _prepare_patch_state(
     Parameters
     ----------
     image : torch.Tensor
-        (t, H, W) movie, already moved to ``device``. Normalized internally, per patch
-        chunk.
+        (t, H, W) movie. May reside on a different device than ``device`` (e.g.
+        large super-res movie stored on CPU). Patches are extracted onto the image's
+        own device and moved to ``device`` one chunk at a time. Normalized
+        internally, per patch chunk.
     pixel_spacing : float
         Pixel spacing in Angstroms.
     deformation_field_resolution : tuple[int, int, int]
@@ -189,7 +191,8 @@ def estimate_local_motion(
     ----------
     image: torch.Tensor
         (t, H, W) image to estimate motion from where t is the number of frames,
-        H is the height, and W is the width.
+        H is the height, and W is the width. May reside on a different device than
+        ``device`` (e.g. large super-res movie stored on CPU).
     pixel_spacing: float
         Pixel spacing in Angstroms.
     deformation_field_resolution: tuple[int, int, int]
@@ -231,7 +234,6 @@ def estimate_local_motion(
     optimizer_kwargs = optimization.optimizer_kwargs
 
     device = device if device is not None else image.device
-    image = image.to(device)
     t, _h, _w = image.shape
 
     trajectory_kwargs = trajectory_kwargs if trajectory_kwargs is not None else {}
