@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-from torch_grid_utils import fftfreq_grid
 
 from .slice_extraction import (
     extract_central_slices_rfft_2d,
@@ -325,8 +324,8 @@ def project_2d_to_1d(
 
     # divide by sinc^2 in real space to correct for the effect of trilinear
     # interpolation during slice extraction. See issue #65 for more info.
-    sinc2 = separable_sinc2_correction(volume_shape, device=volume.device)
-    volume = volume / sinc2
+    sinc2 = separable_sinc2_correction(image_shape, device=image.device)
+    image = image / sinc2
 
     # calculate DFT
     dft = torch.fft.ifftshift(image, dim=(-2, -1))  # image center to array origin
