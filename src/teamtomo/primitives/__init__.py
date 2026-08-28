@@ -7,6 +7,11 @@ except ImportError:
     torch_affine_utils = None
 
 try:
+    import torch_calculate_electrostatic_potential
+except ImportError:
+    torch_calculate_electrostatic_potential = None
+
+try:
     import torch_ctf
 except ImportError:
     torch_ctf = None
@@ -83,6 +88,7 @@ except ImportError:
 
 __all__ = [
     "torch_affine_utils",
+    "torch_calculate_electrostatic_potential",
     "torch_ctf",
     "torch_cubic_spline_grids",
     "torch_find_peaks",
