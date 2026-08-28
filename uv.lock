@@ -12,6 +12,7 @@ members = [
     "teamtomo-basemodel",
     "torch-2dtm",
     "torch-affine-utils",
+    "torch-calculate-electrostatic-potential",
     "torch-cryoeraser",
     "torch-ctf",
     "torch-cubic-spline-grids",
@@ -3758,6 +3759,7 @@ dependencies = [
     { name = "teamtomo-basemodel" },
     { name = "torch-2dtm" },
     { name = "torch-affine-utils" },
+    { name = "torch-calculate-electrostatic-potential" },
     { name = "torch-cryoeraser" },
     { name = "torch-ctf" },
     { name = "torch-cubic-spline-grids" },
@@ -3808,6 +3810,7 @@ requires-dist = [
     { name = "teamtomo-basemodel", editable = "packages/utils/teamtomo-basemodel" },
     { name = "torch-2dtm", editable = "packages/algorithms/torch-2dtm" },
     { name = "torch-affine-utils", editable = "packages/primitives/torch-affine-utils" },
+    { name = "torch-calculate-electrostatic-potential", editable = "packages/primitives/torch-calculate-electrostatic-potential" },
     { name = "torch-cryoeraser", editable = "packages/algorithms/torch-cryoeraser" },
     { name = "torch-ctf", editable = "packages/primitives/torch-ctf" },
     { name = "torch-cubic-spline-grids", editable = "packages/primitives/torch-cubic-spline-grids" },
@@ -4111,14 +4114,56 @@ test = [
 
 [[package]]
 name = "torch-calculate-electrostatic-potential"
-version = "0.1.0"
-source = { git = "https://github.com/teamtomo/torch-calculate-electrostatic-potential.git#225eac4c5de4bb4067e72cfc92b8d8d1a51f35d0" }
+source = { editable = "packages/primitives/torch-calculate-electrostatic-potential" }
 dependencies = [
+    { name = "einops" },
     { name = "gemmi" },
     { name = "numpy" },
     { name = "setuptools" },
     { name = "torch" },
     { name = "tqdm" },
+]
+
+[package.dev-dependencies]
+dev = [
+    { name = "ipython" },
+    { name = "mypy" },
+    { name = "pdbpp" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "rich" },
+    { name = "ruff" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "einops", specifier = ">=0.6.0" },
+    { name = "gemmi", specifier = ">=0.6.7" },
+    { name = "numpy", specifier = ">=1.21.0" },
+    { name = "setuptools" },
+    { name = "torch", specifier = ">=2.0.0" },
+    { name = "tqdm", specifier = ">=4.60.0" },
+]
+
+[package.metadata.requires-dev]
+dev = [
+    { name = "ipython" },
+    { name = "mypy" },
+    { name = "pdbpp" },
+    { name = "pre-commit" },
+    { name = "pytest" },
+    { name = "pytest-cov" },
+    { name = "rich" },
+    { name = "ruff" },
+]
+test = [
+    { name = "pytest" },
+    { name = "pytest-cov" },
 ]
 
 [[package]]
@@ -4397,7 +4442,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0,<3" },
     { name = "torch" },
     { name = "torch-affine-utils", editable = "packages/primitives/torch-affine-utils" },
-    { name = "torch-calculate-electrostatic-potential", git = "https://github.com/teamtomo/torch-calculate-electrostatic-potential.git" },
+    { name = "torch-calculate-electrostatic-potential", editable = "packages/primitives/torch-calculate-electrostatic-potential" },
     { name = "torch-fourier-rescale", editable = "packages/primitives/torch-fourier-rescale" },
     { name = "torch-fourier-slice", editable = "packages/primitives/torch-fourier-slice" },
     { name = "torch-grid-utils", editable = "packages/primitives/torch-grid-utils" },
