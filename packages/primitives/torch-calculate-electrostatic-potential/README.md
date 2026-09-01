@@ -1,14 +1,48 @@
 # torch-calculate-electrostatic-potential
 
-Differentiable Cryo-EM electrostatic (scattering) potential calculator built with PyTorch. Computes differentiable 2D projected and 3D volumetric potentials from atom coordinates using Peng 1996 scattering factors. Calculations are differentiable with respect to input atomic positions, B-factors, and the values `a`/`b` parameterizing each Gaussian kernel.
+Differentiable 2D projected and 3D electrostatic potentials from Peng 1996
+electron-scattering factors.
 
-## Features
+The high-level API consumes
+`torch_structure_manipulation.AtomicStructure`. The tensor-only
+`calculate_scattering_potential_2d` and `calculate_scattering_potential_3d`
+kernels remain public and support arbitrary leading batch dimensions.
 
-- **`calculate_scattering_potential_3d`** / **`calculate_scattering_potential_2d`**: compute a 3D potential volume or a 2D projected potential image. The 2D case is the exact analytic integral of the 3D potential over the projection axis. Both accept arbitrary leading batch dims (e.g. an ensemble of conformations or a batch of poses).
-- **`GridConfig`**: grid geometry — voxel/pixel size and spatial extent (corner points), for either a 3D grid (`grid_shape` length 3) or a 2D grid (length 2). `sublattice_radius` sets the size of the per-atom local region ("stencil") that gets evaluated and scatter-added into the output grid. Increase it when B-factors are high or voxel sizes are small. By default (`equal_length=True`) the grid is symmetrically padded so every axis has the same voxel count as the longest one — a square grid in 2D, a cubic grid in 3D; pass `equal_length=False` to keep an anisotropic voxel count per axis.
-- **`AtomStack`**: a thin convenience wrapper — atom positions, elements, B-factors, and occupancies, with a Peng parameter lookup done once at construction. `to_scattering_potential_3d`/`to_scattering_potential_2d` hand its tensors straight to the functions above.
+Coordinates and spacing are in Angstroms. Axis order is ZYX in 3D and YX in 2D.
 
-**Axis order**: positions and grids use `(z, y, x)` for 3D and `(y, x)` for 2D — `GridConfig`'s `voxel_size`/corner-point tuples must be given in that same order, since it treats them purely positionally.
+## Units and normalization
+
+`peng1996_element_params.npy` contains Peng et al. (1996) **elastic electron
+scattering factors**, not X-ray form factors:
+
+```text
+f_e(s) = sum_i a_i exp(-b_i s²),  s = sin(theta) / wavelength
+```
+
+The amplitudes `a_i` and `f_e` are in Angstroms and `b_i` is in Angstroms
+squared. The X-ray-to-electron Mott-Bethe conversion
+`f_e(s) = 0.023934 (Z - f_X(s)) / s²` is therefore already incorporated in the
+tabulated coefficients and must not be applied again.
+
+An electron scattering factor is not itself a real-space potential in volts.
+The package converts it to the Fourier transform of the electrostatic potential
+using
+
+```text
+V_tilde(g) = C f_e(g / 2),  g = 2s
+C = 2 pi hbar² / (m_e e) = 47.877647... V Angstrom²
+```
+
+The inverse transform returned by `calculate_scattering_potential_3d` and
+`potential_from_structure_3d` is therefore in **volts**. The 2D functions
+analytically integrate the 3D potential over the omitted spatial axis and
+return a projected potential in **volt-Angstroms**.
+
+The bonded coefficients come from
+[Shtyrov et al. (2026)](https://pmc.ncbi.nlm.nih.gov/articles/PMC13167779/)
+and use the equivalent convention `f_e(g) = sum_i a_i exp(-b_i g² / 4)`.
+Protein and RNA currently share the same coefficient table because RNA-specific
+factors have not yet been measured.
 
 ## Installation
 
@@ -18,8 +52,8 @@ pip install torch-calculate-electrostatic-potential
 ```
 
 ```sh
-# Development install from GitHub (main branch)
-pip install git+https://github.com/teamtomo/torch-calculate-electrostatic-potential.git
+# Development install from the monorepo
+pip install -e packages/primitives/torch-calculate-electrostatic-potential
 ```
 
 With [uv](https://github.com/astral-sh/uv): `uv pip install torch-calculate-electrostatic-potential`.
@@ -27,49 +61,118 @@ With [uv](https://github.com/astral-sh/uv): `uv pip install torch-calculate-elec
 ## Usage
 
 ```python
-import torch
-from torch_calculate_electrostatic_potential import AtomStack, GridConfig
-
-# Atom positions in Angstroms, shape (N, 3) in (z, y, x) order
-atom_pos_zyx = torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 1.5], [0.0, 1.5, 0.0]])
-atom_stack = AtomStack.from_coords_and_names(
-    atom_pos_zyx,
-    atom_names=["C", "N", "O"],
-    atom_bfactors=8 * 3.14159**2 * 0.5**2,  # scalar, per-atom (N,), or batched (..., N)
+from torch_calculate_electrostatic_potential import (
+    GridConfig,
+    potential_from_structure_2d,
+    potential_from_structure_3d,
 )
+from torch_structure_manipulation import AtomicStructure
 
-# sublattice_radius is the main complexity lever: larger = more voxels evaluated
-# per atom. Scale with B-factors and voxel size (larger radius for larger
-# B-factors or finer voxels). Axis order must match atom_pos_zyx: (z, y, x).
-grid_3d = GridConfig.from_voxel_size_and_corner_points(
+structure = AtomicStructure.from_dataframe(atoms, device="cuda")
+
+grid_3d = GridConfig.from_grid_shape_and_voxel_size(
+    grid_shape=(128, 128, 128),
     voxel_size=(1.0, 1.0, 1.0),
-    left_bottom_point=(-5.0, -5.0, -5.0),
-    right_upper_point=(5.0, 5.0, 5.0),
+    center_zyx=(0.0, 0.0, 0.0),
     sublattice_radius=5.0,
 )
-potential_volume = atom_stack.to_scattering_potential_3d(grid_3d)
-# potential_volume shape: (Dz, Dy, Dx)
+volume = potential_from_structure_3d(
+    structure,
+    grid_3d,
+    scattering_factors="peng_bonded",
+    bonded_fallback="elemental",
+)
 
-grid_2d = GridConfig.from_voxel_size_and_corner_points(
+grid_2d = GridConfig.from_grid_shape_and_voxel_size(
+    grid_shape=(128, 128),
     voxel_size=(1.0, 1.0),
-    left_bottom_point=(-5.0, -5.0),
-    right_upper_point=(5.0, 5.0),
-    sublattice_radius=5.0,
+    center_yx=(0.0, 0.0),
 )
-potential_image = atom_stack.to_scattering_potential_2d(grid_2d)
-# potential_image shape: (Dy, Dx)
+projected = potential_from_structure_2d(structure, grid_2d)
 ```
 
-The lower-level, tensor-only functions this wraps are also public:
+`scattering_factors="peng_elemental"` is the default and ignores bonding
+metadata. `"peng_bonded"` must be selected explicitly and requires
+`bonded_environments` and per-atom `molecule_types`. Unsupported `other`
+molecules and absent keys either emit one warning and use elemental values
+(`bonded_fallback="elemental"`) or raise (`bonded_fallback="error"`).
+
+The molecule type is the scattering-factor provider key, not merely descriptive
+metadata. Custom providers can therefore supply different tables for protein,
+RNA, or any additional molecule type:
+
+## Batched structures and bonded factors
+
+`AtomicStructure` may carry broadcast-compatible batch dimensions on positions
+and other numerical fields. The tensor kernels and elemental Peng lookup support
+that directly.
+
+Bonded factors are different:
+
+- `bonded_environments` and `molecule_types` are **flat tuples** (one string per
+  atom), shared across the whole batch.
+- `resolve_scattering_parameters(..., scattering_factors="peng_bonded")` requires
+  **one-dimensional** `atomic_numbers` with shape `(n_atoms,)`.
+
+Practical guidance:
+
+| Use case | Elemental | Bonded |
+|----------|-----------|--------|
+| Single structure | yes | yes |
+| Multiple poses, same chemistry (`positions` batched, `atomic_numbers` `(n,)`) | yes | yes |
+| Batched `atomic_numbers` with shape `(batch, n_atoms)` | yes | no — raises |
+| Different chemistry per batch member | N/A | no — not representable |
+
+For different structures, call `potential_from_structure_3d` once per
+`AtomicStructure` (or loop over batch indices).
 
 ```python
-from torch_calculate_electrostatic_potential import calculate_scattering_potential_3d, get_peng_scattering_parameters
+from torch_calculate_electrostatic_potential import BondedScatteringFactorTable
 
-atom_params_a, atom_params_b = get_peng_scattering_parameters(atom_stack.atomic_numbers)
-potential_volume = calculate_scattering_potential_3d(
-    atom_pos_zyx, atom_stack.atom_bfactors, atom_params_a, atom_params_b, grid_3d,
+custom_factors = {
+    "protein": BondedScatteringFactorTable(
+        parameters_a=protein_parameters_a,
+        parameters_b=protein_parameters_b,
+    ),
+    "rna": BondedScatteringFactorTable(
+        parameters_a=rna_parameters_a,
+        parameters_b=rna_parameters_b,
+    ),
+}
+volume = potential_from_structure_3d(
+    structure,
+    grid_3d,
+    scattering_factors=custom_factors,
+    bonded_fallback="error",
 )
 ```
+
+Each parameter mapping is keyed by the structure's `bonded_environments`
+strings. The low-level tensor API remains available for callers that have
+already resolved arbitrary per-atom `a` and `b` tensors.
+
+The lower-level route exposes parameter tensors directly:
+
+```python
+from torch_calculate_electrostatic_potential import (
+    calculate_scattering_potential_3d,
+    get_peng_scattering_parameters,
+)
+
+atom_params_a, atom_params_b = get_peng_scattering_parameters(atomic_numbers)
+potential_volume = calculate_scattering_potential_3d(
+    atom_pos_zyx,
+    atom_bfactors,
+    atom_params_a,
+    atom_params_b,
+    grid_3d,
+    atom_occupancies=occupancies,
+)
+```
+
+Positions, B-factors, occupancies, and explicit parameter tensors remain
+differentiable. `sublattice_radius` controls the finite local stencil; increase
+it for broad Gaussians.
 
 ## Testing
 
@@ -84,9 +187,9 @@ With coverage: `pytest --cov=torch_calculate_electrostatic_potential --cov-repor
 
 ## Requirements
 
-- Python >= 3.9
+- Python >= 3.11
 - PyTorch >= 2.0
-- gemmi, numpy, einops, tqdm
+- torch-structure-manipulation, numpy, einops, tqdm
 
 ## License
 

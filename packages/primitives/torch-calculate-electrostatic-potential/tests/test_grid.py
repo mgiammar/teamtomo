@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from torch_calculate_electrostatic_potential import GridConfig
+from torch_calculate_electrostatic_potential import GridConfig, default_sublattice_radius
 
 
 class TestGridConfigConstruction:
@@ -43,6 +43,29 @@ class TestGridConfigConstruction:
             right_upper_point=(5.0, 5.0, 5.0),
         )
         assert torch.allclose(grid.voxel_size, torch.tensor([1.0, 1.0, 1.0]))
+
+    @pytest.mark.parametrize(
+        ("shape", "voxel_size", "center_name", "center"),
+        [
+            ((5, 7, 9), (1.0, 2.0, 0.5), "center_zyx", (2.0, -1.0, 3.0)),
+            ((6, 8), (1.5, 0.25), "center_yx", (-2.0, 4.0)),
+        ],
+    )
+    def test_centered_grid_constructor(self, shape, voxel_size, center_name, center):
+        grid = GridConfig.from_grid_shape_and_voxel_size(
+            shape,
+            voxel_size,
+            **{center_name: center},
+            equal_length=False,
+        )
+        midpoint = (grid.left_bottom_point + grid.right_upper_point) / 2
+        assert torch.allclose(midpoint, torch.tensor(center))
+
+    def test_center_name_must_match_dimensions(self):
+        with pytest.raises(ValueError, match="center_zyx requires a 3D"):
+            GridConfig.from_grid_shape_and_voxel_size(
+                (5, 5), (1.0, 1.0), center_zyx=(0.0, 0.0, 0.0)
+            )
 
 
 class TestSquareOrCubic:
@@ -203,3 +226,10 @@ class TestAtomAnchoring:
         indices = torch.tensor([[0, 0, 0], [0, 0, 1], [0, 1, 0], [1, 0, 0]])
         flat = grid.convert_cubic_index_to_flat_index(indices)
         assert flat.tolist() == [0, 1, 4, 12]
+
+
+def test_default_sublattice_radius():
+    assert default_sublattice_radius(1.0) == 5.0
+    assert default_sublattice_radius(2.0) == 6.0
+    with pytest.raises(ValueError, match="pixel_spacing"):
+        default_sublattice_radius(0.0)

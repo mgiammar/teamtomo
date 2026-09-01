@@ -50,7 +50,7 @@ classifiers = [
 dependencies = [
     "torch>=2.0.0",
     "numpy>=1.21.0",
-    "gemmi>=0.6.7",
+    "torch-structure-manipulation",
     "tqdm>=4.60.0",
     "einops>=0.6.0",
     "setuptools",    # Required by PyTorch's inductor compiler (torch.compile)
@@ -71,7 +71,11 @@ dev = [
     "pre-commit",
     "rich",                     # https://github.com/Textualize/rich
     "ruff",
+    "types-tqdm",
 ]
+
+[tool.uv.sources]
+torch-structure-manipulation = { workspace = true }
 
 # Entry points
 # https://peps.python.org/pep-0621/#entry-points
@@ -117,7 +121,7 @@ skip-magic-trailing-comma = false
 
 # https://mypy.readthedocs.io/en/stable/config_file.html
 [tool.mypy]
-files = "src/**/"
+files = "src/torch_calculate_electrostatic_potential"
 strict = true
 disallow_any_generics = false
 disallow_subclassing_any = false

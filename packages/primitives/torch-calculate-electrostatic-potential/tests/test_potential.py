@@ -3,12 +3,29 @@ import math
 import pytest
 import torch
 
-from torch_calculate_electrostatic_potential import GridConfig
+from torch_calculate_electrostatic_potential import (
+    PENG_SCATTERING_TO_POTENTIAL,
+    GridConfig,
+)
 from torch_calculate_electrostatic_potential.potential import (
     calculate_scattering_potential_2d,
     calculate_scattering_potential_3d,
     evaluate_gaussian_sum,
 )
+
+
+def test_scattering_factor_to_potential_constant_has_physical_units():
+    planck_constant = 6.62607015e-34  # J s, exact
+    elementary_charge = 1.602176634e-19  # C, exact
+    electron_mass = 9.1093837139e-31  # kg, CODATA 2022
+    square_meters_to_square_angstroms = 1e20
+    expected_v_angstrom_squared = (
+        planck_constant**2
+        / (2 * math.pi * electron_mass * elementary_charge)
+        * square_meters_to_square_angstroms
+    )
+
+    assert PENG_SCATTERING_TO_POTENTIAL == pytest.approx(expected_v_angstrom_squared)
 
 
 def _manual_point_sample(diff, a, b, bfactor):
@@ -18,7 +35,7 @@ def _manual_point_sample(diff, a, b, bfactor):
     squared_distance = (diff**2).sum(dim=-1, keepdim=True)
     prefactor = a.unsqueeze(-2) * (4 * math.pi) ** (D / 2) * w.unsqueeze(-2) ** (D / 2)
     exponent = torch.exp(-4 * math.pi**2 * squared_distance * w.unsqueeze(-2))
-    return (prefactor * exponent).sum(dim=-1)
+    return PENG_SCATTERING_TO_POTENTIAL * (prefactor * exponent).sum(dim=-1)
 
 
 class TestEvaluateGaussianSum:
@@ -220,6 +237,31 @@ class TestCalculateScatteringPotential:
             grid,
         )
         assert out.shape == (3, *grid.grid_shape.tolist())
+
+    @pytest.mark.parametrize("ndim", [2, 3])
+    def test_integral_has_physical_units(self, ndim):
+        shape = (41,) * ndim
+        grid = GridConfig.from_grid_shape_and_voxel_size(
+            grid_shape=shape,
+            voxel_size=(0.1,) * ndim,
+            center_zyx=(0.0, 0.0, 0.0) if ndim == 3 else None,
+            center_yx=(0.0, 0.0) if ndim == 2 else None,
+            sublattice_radius=2.0,
+        )
+        amplitude = 1.7
+        a = torch.tensor([[amplitude, 0.0, 0.0, 0.0, 0.0]])
+        b = torch.ones((1, 5))
+        positions = torch.zeros((1, ndim))
+        b_factors = torch.zeros(1)
+        calculate = (
+            calculate_scattering_potential_3d
+            if ndim == 3
+            else calculate_scattering_potential_2d
+        )
+        potential = calculate(positions, b_factors, a, b, grid)
+        integral = potential.sum() * grid.voxel_size.prod()
+        expected = PENG_SCATTERING_TO_POTENTIAL * amplitude
+        assert integral.item() == pytest.approx(expected, rel=2e-5)
 
 
 class TestGradients:

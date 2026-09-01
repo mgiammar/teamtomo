@@ -1,13 +1,35 @@
-"""Core differentiable scattering-potential math, shared by the 2D and 3D APIs.
+"""Core differentiable electrostatic-potential math, shared by the 2D and 3D APIs.
 
 Based on the D-dimensional isotropic Gaussian parameterization in Peng et al., 1996:
 
-    V_D(r) = sum_i a_i * (4*pi)^(D/2) * w_i^(D/2) * exp(-4*pi^2 * w_i * |r|_D^2)
+    V_D(r) = C * sum_i a_i * (4*pi)^(D/2) * w_i^(D/2)
+             * exp(-4*pi^2 * w_i * |r|_D^2)
+
+The stored Peng coefficients already parameterize elastic electron scattering
+factors, not X-ray form factors:
+
+    f_e(s) = sum_i a_i * exp(-b_i * s^2),  s = sin(theta) / wavelength
+
+Consequently, they must not undergo the X-ray-to-electron Mott-Bethe conversion
+``f_e(s) = 0.023934 * (Z - f_X(s)) / s²`` again. To produce electrostatic
+potential in volts, however, the electron scattering factor must still be
+converted to a voltage-normalized Fourier potential. For Fourier spatial
+frequency ``g = 2s``:
+
+    V_tilde(g) = C * f_e(g / 2)
+    C = 2*pi*hbar^2 / (m_e*e) = h^2 / (2*pi*m_e*e)
+      = 47.877647... V Angstrom^2
+
+Each normalized inverse-Fourier Gaussian integrates to its coefficient ``a_i``,
+so ``integral(V_D) = C * sum(a_i)``. The 3D inverse transform therefore has
+units V, while its analytic projection over one Angstrom-valued spatial axis
+has units V Angstrom. See Kirkland, *Advanced Computing in Electron Microscopy*,
+section 5.2.
 """
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import einops
 import torch
@@ -15,6 +37,10 @@ from tqdm import tqdm
 
 if TYPE_CHECKING:
     from .grid import GridConfig
+
+# Electron-scattering-factor (Å) to Fourier-potential (V Å³) normalization.
+# Computed from CODATA 2022 electron mass and exact SI values for h and e.
+PENG_SCATTERING_TO_POTENTIAL = 47.877647240509745  # V Å²
 
 
 def evaluate_gaussian_sum(
@@ -47,7 +73,8 @@ def evaluate_gaussian_sum(
     Returns
     -------
     torch.Tensor
-        The potential at each voxel, shape (..., N, K).
+        Per-atom potential at each voxel, shape (..., N, K). Units are V when
+        ``D == 3`` and V Angstrom when ``D == 2``.
     """
     D = diff.shape[-1]
     gaussian_width = 1.0 / (b + bfactor.unsqueeze(-1))
@@ -69,13 +96,14 @@ def evaluate_gaussian_sum(
         spatial_integral = torch.prod(erf_diff, dim=-2)
         numerator = (spatial_integral * a_expanded).sum(dim=-1)
 
-        return numerator / (2**D * voxel_size.prod())
+        result = PENG_SCATTERING_TO_POTENTIAL * numerator / (2**D * voxel_size.prod())
     else:
         squared_distance = einops.reduce(diff**2, "... n k d -> ... n k 1", "sum")
         prefactor = a_expanded * (4 * torch.pi) ** (D / 2) * gw_expanded ** (D / 2)
         exponent = torch.exp(-4 * torch.pi**2 * squared_distance * gw_expanded)
+        result = PENG_SCATTERING_TO_POTENTIAL * (prefactor * exponent).sum(dim=-1)
 
-        return (prefactor * exponent).sum(dim=-1)
+    return cast("torch.Tensor", result)
 
 
 def _calculate_scattering_potential(
@@ -107,7 +135,7 @@ def _calculate_scattering_potential(
     ]
     if atom_occupancies is not None:
         batch_shapes.append(atom_occupancies.shape[:-1])
-    batch_shape = torch.broadcast_shapes(*batch_shapes)
+    batch_shape = torch.broadcast_shapes(*batch_shapes)  # type: ignore[no-untyped-call]
     batch_total = 1
     for size in batch_shape:
         batch_total *= size
@@ -192,7 +220,7 @@ def calculate_scattering_potential_3d(
     batch_size: int = 4096,
     verbose: bool = False,
 ) -> torch.Tensor:  # (..., *grid_config.grid_shape)
-    """Compute a differentiable 3D scattering-potential volume.
+    """Compute a differentiable 3D electrostatic-potential volume in volts.
 
     Parameters
     ----------
@@ -218,7 +246,7 @@ def calculate_scattering_potential_3d(
     Returns
     -------
     torch.Tensor
-        Potential volume(s), shape (..., *grid_config.grid_shape).
+        Potential volume(s) in volts, shape (..., *grid_config.grid_shape).
     """
     if grid_config.ndim != 3:
         raise ValueError(
@@ -250,7 +278,7 @@ def calculate_scattering_potential_2d(
     batch_size: int = 4096,
     verbose: bool = False,
 ) -> torch.Tensor:  # (..., *grid_config.grid_shape)
-    """Compute a differentiable 2D projected scattering-potential image.
+    """Compute a differentiable 2D projected electrostatic potential.
 
     Parameters
     ----------
@@ -276,7 +304,7 @@ def calculate_scattering_potential_2d(
     Returns
     -------
     torch.Tensor
-        Potential image(s), shape (..., *grid_config.grid_shape).
+        Potential image(s) in V Angstrom, shape (..., *grid_config.grid_shape).
     """
     if grid_config.ndim != 2:
         raise ValueError(

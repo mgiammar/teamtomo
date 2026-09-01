@@ -1,11 +1,12 @@
-"""AtomStack wraps structure data to the scattering-potential API."""
+"""Compatibility adapter from the historical AtomStack API to AtomicStructure."""
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import gemmi
 import torch
+from torch_structure_manipulation import AtomicStructure
 
 from .potential import (
     calculate_scattering_potential_2d,
@@ -18,92 +19,107 @@ if TYPE_CHECKING:
 
 
 class AtomStack:
-    """Atoms with coordinates, elements, B-factors, and occupancies + helper functions.
-
-    Attributes
-    ----------
-    device : torch.device
-        The device on which the atom data is stored.
-    atom_names : list[str] | None
-        Optional list of atom names (e.g., ["C", "N", "O"]).
-    atomic_numbers : torch.Tensor
-        Tensor of integer atomic numbers, shape (N,).
-    atom_pos_zyx : torch.Tensor
-        Tensor of atom coordinates in Angstroms, shape (..., N, 3).
-    atom_bfactors : torch.Tensor
-        Tensor of atom B-factors in Angstroms^2, shape (..., N).
-    atom_occupancies : torch.Tensor
-        Tensor of atom occupancies, shape (..., N).
-    atom_params_a : torch.Tensor
-        Tensor of Peng scattering amplitude parameters, shape (5, N).
-    atom_params_b : torch.Tensor
-        Tensor of Peng scattering width parameters, shape (5, N).
-
-    """
-
-    device: torch.device
-    atom_names: list[str] | None  # (N,), optional atom names
-    atomic_numbers: torch.Tensor  # (N,), integer atomic numbers
-    atom_pos_zyx: torch.Tensor  # (..., N, 3), in units of Angstroms
-    atom_bfactors: torch.Tensor  # (..., N), B-factors in units of Angstroms^2
-    atom_occupancies: torch.Tensor  # (..., N), occupancies, unitless
-    atom_params_a: torch.Tensor  # (5, N), amplitude scattering parameters
-    atom_params_b: torch.Tensor  # (5, N), width scattering parameters
+    """Expose the historical atom-stack API over an ``AtomicStructure``."""
 
     def __init__(
         self,
-        atom_pos_zyx: torch.Tensor,  # (..., N, 3), Angstroms
-        atomic_numbers: torch.Tensor,  # (N,)
-        atom_bfactors: torch.Tensor | float = 0.0,  # (..., N) or scalar
-        atom_occupancies: torch.Tensor | float = 1.0,  # (..., N) or scalar
+        atom_pos_zyx: torch.Tensor,
+        atomic_numbers: torch.Tensor,
+        atom_bfactors: torch.Tensor | float = 0.0,
+        atom_occupancies: torch.Tensor | float = 1.0,
         atom_names: list[str] | None = None,
         device: torch.device | str = "cpu",
-    ):
-        if atom_pos_zyx.ndim < 2 or atom_pos_zyx.shape[-1] != 3:
-            raise ValueError(
-                "atom_pos_zyx must have shape (..., N, 3), "
-                f"got {tuple(atom_pos_zyx.shape)}"
-            )
-        atomic_numbers = torch.as_tensor(atomic_numbers, dtype=torch.int64)
-        if (
-            atomic_numbers.ndim != 1
-            or atomic_numbers.shape[0] != atom_pos_zyx.shape[-2]
-        ):
-            raise ValueError(
-                f"atomic_numbers must have shape (N,) = ({atom_pos_zyx.shape[-2]},), "
-                f"got {tuple(atomic_numbers.shape)}"
-            )
-
-        self.device = torch.device(device)
-        self.atom_pos_zyx = atom_pos_zyx.to(self.device)
-        self.atomic_numbers = atomic_numbers.to(self.device)
-        self.atom_names = atom_names
-
-        num_atoms = atom_pos_zyx.shape[-2]
-        self.atom_bfactors = self._as_per_atom_tensor(atom_bfactors, num_atoms)
-        self.atom_occupancies = self._as_per_atom_tensor(atom_occupancies, num_atoms)
-
-        self.atom_params_a, self.atom_params_b = get_peng_scattering_parameters(
-            self.atomic_numbers, device=self.device
+    ) -> None:
+        resolved_device = torch.device(device)
+        positions = atom_pos_zyx.to(resolved_device)
+        numbers = torch.as_tensor(
+            atomic_numbers, dtype=torch.int64, device=resolved_device
+        )
+        b_factors = torch.as_tensor(
+            atom_bfactors, dtype=torch.float32, device=resolved_device
+        )
+        occupancies = torch.as_tensor(
+            atom_occupancies, dtype=torch.float32, device=resolved_device
         )
 
-    def _as_per_atom_tensor(
-        self, value: torch.Tensor | float, num_atoms: int
-    ) -> torch.Tensor:
-        tensor = torch.as_tensor(value, dtype=torch.float32, device=self.device)
-        if tensor.ndim >= 1 and tensor.shape[-1] != num_atoms:
-            raise ValueError(
-                f"expected trailing dim {num_atoms}, got shape {tuple(tensor.shape)}"
+        num_atoms = positions.shape[-2] if positions.ndim >= 2 else 0
+        names = ("",) * num_atoms if atom_names is None else tuple(atom_names)
+        elements = tuple(
+            gemmi.Element(int(number)).name for number in numbers.detach().cpu()
+        )
+        self._structure = AtomicStructure(
+            positions_zyx=positions,
+            atomic_numbers=numbers,
+            elements=elements,
+            atom_names=names,
+            b_factors=b_factors,
+            occupancies=occupancies,
+        )
+        self._has_atom_names = atom_names is not None
+        self._atom_params: tuple[torch.Tensor, torch.Tensor] | None = None
+
+    @property
+    def structure(self) -> AtomicStructure:
+        """The wrapped atomic structure."""
+        return self._structure
+
+    @property
+    def device(self) -> torch.device:
+        """Device on which the atom data is stored."""
+        return self._structure.device
+
+    @property
+    def atom_names(self) -> list[str] | None:
+        """Optional legacy list of atom names."""
+        if not self._has_atom_names:
+            return None
+        return list(self._structure.atom_names)
+
+    @property
+    def atomic_numbers(self) -> torch.Tensor:
+        """Integer atomic numbers with shape ``(N,)``."""
+        return self._structure.atomic_numbers
+
+    @property
+    def atom_pos_zyx(self) -> torch.Tensor:
+        """Atom coordinates in Angstroms with shape ``(..., N, 3)``."""
+        return self._structure.positions_zyx
+
+    @property
+    def atom_bfactors(self) -> torch.Tensor:
+        """Atomic B-factors in Angstroms squared."""
+        return self._structure.b_factors
+
+    @property
+    def atom_occupancies(self) -> torch.Tensor:
+        """Unitless atomic occupancies."""
+        return self._structure.occupancies
+
+    @property
+    def atom_params_a(self) -> torch.Tensor:
+        """Peng scattering amplitude parameters with shape ``(N, 5)``."""
+        return self._peng_parameters[0]
+
+    @property
+    def atom_params_b(self) -> torch.Tensor:
+        """Peng scattering width parameters with shape ``(N, 5)``."""
+        return self._peng_parameters[1]
+
+    @property
+    def _peng_parameters(self) -> tuple[torch.Tensor, torch.Tensor]:
+        if self._atom_params is None:
+            self._atom_params = get_peng_scattering_parameters(
+                self.atomic_numbers, device=self.device
             )
-        return tensor
+        return self._atom_params
 
     @property
     def num_atoms(self) -> int:
         """Number of atoms in the stack."""
-        return self.atom_pos_zyx.shape[-2]
+        return self._structure.num_atoms
 
     def __repr__(self) -> str:
-        """Obtain string representation of the AtomStack."""
+        """Obtain the historical concise string representation."""
         batch_shape = tuple(self.atom_pos_zyx.shape[:-2])
         return (
             f"AtomStack(num_atoms={self.num_atoms}, "
@@ -120,26 +136,7 @@ class AtomStack:
         atom_occupancies: torch.Tensor | float = 1.0,
         device: torch.device | str = "cpu",
     ) -> AtomStack:
-        """Construct an AtomStack from coordinates and atom names.
-
-        Parameters
-        ----------
-        atom_pos_zyx : torch.Tensor
-            Atom coordinates in Angstroms, shape (..., N, 3).
-        atom_names : list[str]
-            Atom names (e.g., ["C", "N", "O"]), length N.
-        atom_bfactors : torch.Tensor or float, optional
-            Atom B-factors in Angstroms^2, shape (..., N) or scalar, default 0.0.
-        atom_occupancies : torch.Tensor or float, optional
-            Atom occupancies, shape (..., N) or scalar, default 1.0.
-        device : torch.device or str, optional
-            Device for the tensors, default "cpu".
-
-        Returns
-        -------
-        AtomStack
-            An AtomStack instance with the provided coordinates and atom names.
-        """
+        """Construct an AtomStack from coordinates and element names."""
         atomic_numbers = torch.tensor(
             [gemmi.Element(name).atomic_number for name in atom_names],
             dtype=torch.int64,
@@ -168,22 +165,9 @@ class AtomStack:
         )
 
     def to_scattering_potential_3d(
-        self, grid_config: GridConfig, **kwargs
+        self, grid_config: GridConfig, **kwargs: Any
     ) -> torch.Tensor:
-        """Compute the 3D scattering potential. See `calculate_scattering_potential_3d`.
-
-        Parameters
-        ----------
-        grid_config : GridConfig
-            Grid configuration for the scattering potential volume.
-        **kwargs : dict
-            Additional keyword arguments to pass to `calculate_scattering_potential_3d`.
-
-        Returns
-        -------
-        torch.Tensor
-            The computed 3D scattering potential volume.
-        """
+        """Compute a 3D potential using the current physical kernel."""
         return calculate_scattering_potential_3d(
             atom_pos_zyx=self.atom_pos_zyx,
             atom_bfactors=self.atom_bfactors,
@@ -195,22 +179,9 @@ class AtomStack:
         )
 
     def to_scattering_potential_2d(
-        self, grid_config: GridConfig, **kwargs
+        self, grid_config: GridConfig, **kwargs: Any
     ) -> torch.Tensor:
-        """Compute the 2D scattering potential. See `calculate_scattering_potential_2d`.
-
-        Parameters
-        ----------
-        grid_config : GridConfig
-            Grid configuration for the scattering potential image.
-        **kwargs : dict
-            Additional keyword arguments to pass to `calculate_scattering_potential_2d`.
-
-        Returns
-        -------
-        torch.Tensor
-            The computed 2D scattering potential image.
-        """
+        """Compute a projected 2D potential using the current physical kernel."""
         return calculate_scattering_potential_2d(
             atom_pos_yx=self.atom_pos_zyx[..., 1:],
             atom_bfactors=self.atom_bfactors,

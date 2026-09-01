@@ -1,6 +1,7 @@
 import gemmi
 import pytest
 import torch
+from torch_structure_manipulation import AtomicStructure
 
 from torch_calculate_electrostatic_potential import AtomStack, GridConfig
 
@@ -48,10 +49,28 @@ class TestAtomStackConstruction:
             )
 
     def test_batched_positions(self):
-        coords = torch.randn(4, 3, 3)  # (ensemble, N, 3)
+        coords = torch.randn(4, 3, 3)
         stack = AtomStack.from_coords_and_names(coords, ["C", "N", "O"])
         assert stack.num_atoms == 3
         assert stack.atom_pos_zyx.shape == (4, 3, 3)
+
+    def test_wraps_atomic_structure(self):
+        stack = AtomStack.from_coords_and_names(torch.zeros(2, 3), ["C", "O"])
+        assert isinstance(stack.structure, AtomicStructure)
+        assert stack.structure.positions_zyx is stack.atom_pos_zyx
+        assert stack.structure.b_factors is stack.atom_bfactors
+
+    def test_batched_positions_broadcast_scalar_properties(self):
+        coords = torch.randn(4, 3, 3)
+        stack = AtomStack.from_coords_and_names(
+            coords,
+            ["C", "N", "O"],
+            atom_bfactors=15.0,
+            atom_occupancies=0.75,
+        )
+        assert stack.structure.batch_shape == (4,)
+        assert stack.atom_bfactors.shape == ()
+        assert stack.atom_occupancies.shape == ()
 
 
 class TestAtomStackScatteringPotential:
@@ -102,9 +121,10 @@ class TestAtomStackScatteringPotential:
         img = stack.to_scattering_potential_2d(grid2d)
         assert img.shape == tuple(grid2d.grid_shape.tolist())
 
-        # Moving all atoms along z only should not change the projection at all.
         stack_shifted = AtomStack.from_coords_and_names(
-            coords + torch.tensor([10.0, 0.0, 0.0]), ["C", "N", "O"], atom_bfactors=20.0
+            coords + torch.tensor([10.0, 0.0, 0.0]),
+            ["C", "N", "O"],
+            atom_bfactors=20.0,
         )
         img_shifted = stack_shifted.to_scattering_potential_2d(grid2d)
         assert torch.allclose(img, img_shifted)
@@ -128,7 +148,8 @@ class TestAtomStackScatteringPotential:
 
     def test_gradient_flows_through_atom_stack(self):
         pos = torch.tensor(
-            [[0.0, 0.0, 0.0], [1.5, 0.3, -0.7], [-1.2, 2.0, 0.5]], requires_grad=True
+            [[0.0, 0.0, 0.0], [1.5, 0.3, -0.7], [-1.2, 2.0, 0.5]],
+            requires_grad=True,
         )
         stack = AtomStack.from_coords_and_names(
             pos, ["C", "N", "O"], atom_bfactors=20.0

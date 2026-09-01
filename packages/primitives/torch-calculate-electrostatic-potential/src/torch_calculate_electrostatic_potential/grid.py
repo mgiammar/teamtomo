@@ -9,6 +9,18 @@ import numpy as np
 import torch
 
 
+def default_sublattice_radius(pixel_spacing: float) -> float:
+    """Return the default per-atom stencil radius for a given voxel spacing.
+
+    The radius is ``max(5.0, 3.0 * pixel_spacing)`` Angstroms. This matches the
+    sizing used by ``torch-fit-in-map`` and ``ttsim3d`` when no explicit radius
+    is supplied.
+    """
+    if pixel_spacing <= 0:
+        raise ValueError("pixel_spacing must be positive")
+    return max(5.0, 3.0 * pixel_spacing)
+
+
 @dataclass
 class _Stencil:
     """Precomputed local sublattice inserted around every atom."""
@@ -41,9 +53,10 @@ class GridConfig:
     sublattice_radius : float
         Radius of the sublattice stencil around each atom, in Angstroms.
     equal_length : bool
-        If True (default), all axes have the same voxel count done via symmetrical
-        padding. If False, then number of voxels per-axis is derived as minimum to fit
-        the given corner points and voxel size.
+        If True (default), all axes are symmetrically padded during
+        construction to the longest axis length. This **mutates**
+        ``grid_shape``, ``left_bottom_point``, and ``right_upper_point`` in
+        place. If False, each axis keeps the requested voxel count.
     dtype : torch.dtype
         Data type for grid computations, by default torch.float32.
     device : torch.device
@@ -79,8 +92,10 @@ class GridConfig:
             Radius of the sublattice stencil around each atom, in Angstroms. Default is
             10.0.
         equal_length : bool, optional
-            If True (default), every axis is symmetrically padded to match the voxel
-            count of the longest axis.
+            If True (default), every axis is symmetrically padded during
+            construction to match the voxel count of the longest axis. This
+            updates ``grid_shape``, ``left_bottom_point``, and
+            ``right_upper_point`` in place before the config is used.
         dtype : torch.dtype, optional
             Data type for grid computations, by default torch.float32.
         device : torch.device, optional
@@ -127,7 +142,10 @@ class GridConfig:
         self._stencil: _Stencil | None = None
 
     def _constrain_to_equal_length(self) -> None:
-        """Symmetrically pad shorter axes up to the longest axis length."""
+        """Symmetrically pad shorter axes up to the longest axis length.
+
+        Mutates ``grid_shape``, ``left_bottom_point``, and ``right_upper_point``.
+        """
         max_extent = int(self.grid_shape.max().item())
         for axis in range(self.ndim):
             extra = max_extent - int(self.grid_shape[axis].item())
@@ -302,14 +320,40 @@ class GridConfig:
         voxel_size: tuple[float, ...] | torch.Tensor,
         left_bottom_point: tuple[float, ...] | torch.Tensor | None = None,
         right_upper_point: tuple[float, ...] | torch.Tensor | None = None,
+        *,
+        center_zyx: tuple[float, float, float] | torch.Tensor | None = None,
+        center_yx: tuple[float, float] | torch.Tensor | None = None,
         sublattice_radius: float = 10.0,
         equal_length: bool = True,
         dtype: torch.dtype = torch.float32,
         device: torch.device | None = None,
     ) -> GridConfig:
-        """Helper constructor to create a GridConfig from grid shape and voxel size."""
+        """Create a grid with optional explicit 3D or 2D center coordinates.
+
+        ``center_zyx`` and ``center_yx`` locate the center voxel for odd grid
+        dimensions and the midpoint between center voxels for even dimensions.
+        """
         if device is None:
             device = torch.device("cpu")
+        centers = [center for center in (center_zyx, center_yx) if center is not None]
+        if len(centers) > 1:
+            raise ValueError("provide only one of center_zyx or center_yx")
+        if centers:
+            if left_bottom_point is not None or right_upper_point is not None:
+                raise ValueError("center coordinates cannot be combined with corners")
+            ndim = len(grid_shape)
+            expected_ndim = 3 if center_zyx is not None else 2
+            if ndim != expected_ndim:
+                center_name = "center_zyx" if center_zyx is not None else "center_yx"
+                raise ValueError(
+                    f"{center_name} requires a {expected_ndim}D grid_shape"
+                )
+            shape_tensor = torch.as_tensor(grid_shape, dtype=torch.int64, device=device)
+            voxel_tensor = torch.as_tensor(voxel_size, dtype=dtype, device=device)
+            center_tensor = torch.as_tensor(centers[0], dtype=dtype, device=device)
+            half_span = (shape_tensor - 1).to(dtype) * voxel_tensor / 2
+            left_bottom_point = center_tensor - half_span
+            right_upper_point = center_tensor + half_span
         return cls(
             grid_shape=grid_shape,
             voxel_size=voxel_size,
