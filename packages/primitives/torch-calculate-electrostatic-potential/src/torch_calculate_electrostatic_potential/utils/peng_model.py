@@ -23,13 +23,55 @@ from typing import Any, Literal, cast
 import numpy as np
 import torch
 
+# Peng elemental tables and the current potential kernel both use five Gaussians.
+PENG_GAUSSIAN_TERM_COUNT = 5
+
 
 @dataclass(frozen=True, slots=True)
 class BondedScatteringFactorTable:
-    """Gaussian scattering factors keyed by bonded-environment identifier."""
+    """Gaussian scattering factors keyed by bonded-environment identifier.
+
+    Every environment must provide the same number of ``(a_i, b_i)`` Gaussian
+    terms in ``parameters_a`` and ``parameters_b``. Use :attr:`n_gaussian_terms`
+    to query that count.
+    """
 
     parameters_a: Mapping[str, Sequence[float]]
     parameters_b: Mapping[str, Sequence[float]]
+
+    def __post_init__(self) -> None:
+        """Validate bonded-environment parameter tables."""
+        if not self.parameters_a:
+            raise ValueError("parameters_a must not be empty")
+        if set(self.parameters_a) != set(self.parameters_b):
+            raise ValueError(
+                "parameters_a and parameters_b must have the same environment keys"
+            )
+        term_counts: set[int] = set()
+        for environment in self.parameters_a:
+            coeffs_a = self.parameters_a[environment]
+            coeffs_b = self.parameters_b[environment]
+            if len(coeffs_a) != len(coeffs_b):
+                raise ValueError(
+                    f"environment {environment!r}: parameters_a and parameters_b "
+                    "must have the same length"
+                )
+            if len(coeffs_a) == 0:
+                raise ValueError(
+                    f"environment {environment!r}: at least one Gaussian term "
+                    "is required"
+                )
+            term_counts.add(len(coeffs_a))
+        if len(term_counts) != 1:
+            raise ValueError(
+                "all environments in a BondedScatteringFactorTable must use the same "
+                f"number of Gaussian terms, got {sorted(term_counts)}"
+            )
+
+    @property
+    def n_gaussian_terms(self) -> int:
+        """Number of Gaussian terms in every bonded-environment sequence."""
+        return len(next(iter(self.parameters_a.values())))
 
 
 BondedScatteringFactorProviders = Mapping[str, BondedScatteringFactorTable]
@@ -164,6 +206,12 @@ def resolve_scattering_parameters(
                 f"atom {index}: {molecule_type.strip().lower()} key {environment!r}"
             )
             continue
+        if provider.n_gaussian_terms != PENG_GAUSSIAN_TERM_COUNT:
+            raise ValueError(
+                f"provider {molecule_type.strip().lower()!r} defines "
+                f"{provider.n_gaussian_terms} Gaussian terms, but the potential "
+                f"kernel currently requires {PENG_GAUSSIAN_TERM_COUNT}"
+            )
         a[index] = torch.as_tensor(
             provider.parameters_a[environment], device=a.device, dtype=a.dtype
         )

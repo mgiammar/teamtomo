@@ -235,3 +235,41 @@ def test_structure_2d_projects_z_and_preserves_gradients():
     assert torch.isfinite(positions.grad).all()
     assert positions.grad[:, 0].count_nonzero() == 0
     assert positions.grad[:, 1:].abs().sum() > 0
+
+
+def test_bonded_scattering_factor_table_reports_gaussian_term_count():
+    table = BondedScatteringFactorTable(
+        parameters_a={"X": [1.0, 2.0, 3.0, 4.0, 5.0]},
+        parameters_b={"X": [6.0, 7.0, 8.0, 9.0, 10.0]},
+    )
+    assert table.n_gaussian_terms == 5
+
+
+def test_bonded_scattering_factor_table_validates_sequence_lengths():
+    with pytest.raises(ValueError, match="same length"):
+        BondedScatteringFactorTable(
+            parameters_a={"X": [1.0, 2.0]},
+            parameters_b={"X": [3.0]},
+        )
+    with pytest.raises(ValueError, match="same number of Gaussian terms"):
+        BondedScatteringFactorTable(
+            parameters_a={"X": [1.0, 2.0], "Y": [3.0, 4.0, 5.0]},
+            parameters_b={"X": [1.0, 2.0], "Y": [3.0, 4.0, 5.0]},
+        )
+
+
+def test_resolve_scattering_parameters_rejects_mismatched_gaussian_term_count():
+    providers = {
+        "protein": BondedScatteringFactorTable(
+            parameters_a={"X": [1.0, 2.0, 3.0]},
+            parameters_b={"X": [4.0, 5.0, 6.0]},
+        )
+    }
+    with pytest.raises(ValueError, match="currently requires 5"):
+        resolve_scattering_parameters(
+            torch.tensor([6]),
+            scattering_factors=providers,
+            bonded_environments=("X",),
+            molecule_types=("protein",),
+            bonded_fallback="error",
+        )

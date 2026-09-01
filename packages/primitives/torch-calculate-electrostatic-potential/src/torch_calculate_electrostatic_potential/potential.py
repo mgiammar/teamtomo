@@ -29,7 +29,7 @@ section 5.2.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING
 
 import einops
 import torch
@@ -96,14 +96,16 @@ def evaluate_gaussian_sum(
         spatial_integral = torch.prod(erf_diff, dim=-2)
         numerator = (spatial_integral * a_expanded).sum(dim=-1)
 
-        result = PENG_SCATTERING_TO_POTENTIAL * numerator / (2**D * voxel_size.prod())
+        result: torch.Tensor = (
+            PENG_SCATTERING_TO_POTENTIAL * numerator / (2**D * voxel_size.prod())
+        )
     else:
         squared_distance = einops.reduce(diff**2, "... n k d -> ... n k 1", "sum")
         prefactor = a_expanded * (4 * torch.pi) ** (D / 2) * gw_expanded ** (D / 2)
         exponent = torch.exp(-4 * torch.pi**2 * squared_distance * gw_expanded)
         result = PENG_SCATTERING_TO_POTENTIAL * (prefactor * exponent).sum(dim=-1)
 
-    return cast("torch.Tensor", result)
+    return result
 
 
 def _calculate_scattering_potential(
