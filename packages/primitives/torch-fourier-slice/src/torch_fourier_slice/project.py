@@ -1,6 +1,5 @@
 import torch
 import torch.nn.functional as F
-from torch_grid_utils import fftfreq_grid
 
 from .slice_extraction import (
     extract_central_slices_rfft_2d,
@@ -9,7 +8,11 @@ from .slice_extraction import (
     transform_slice_2d,
     transform_slice_2d_multichannel,
 )
-from .volume_utils import compute_cube_face_averages
+from .volume_utils import (
+    compute_cube_face_averages,
+    compute_square_edge_averages,
+    separable_sinc2_correction,
+)
 
 
 def project_3d_to_2d(
@@ -75,22 +78,26 @@ def project_3d_to_2d(
     if pad_factor < 1.0:
         raise ValueError("pad_factor must be >= 1.0")
 
-    # Apply edge padding to the nearest integer matching the desired pad_factor
+    # Subtract the edge value so the padded region continues smoothly from zero
+    edge_value = compute_cube_face_averages(volume, n=4)  # NOTE: 4 is arbitrary
+    volume = volume - edge_value
+
+    # Apply zero padding to the nearest integer matching the desired pad_factor
     if pad_factor > 1.0:
         p = int((w * (pad_factor - 1.0)) // 2)
-        edge_value = compute_cube_face_averages(volume, n=4)  # 4 is arbitrary
-        volume = F.pad(volume, pad=[p] * 6, mode="constant", value=edge_value)
+        volume = F.pad(volume, pad=[p] * 6, mode="constant", value=0.0)
 
-    # Track volume shape and mean as variables
     volume_shape = tuple(volume.shape[-3:])
-    volume_mean = volume.mean()
+
+    # divide by sinc^2 in real space to correct for the effect of trilinear
+    # interpolation during slice extraction. See issue #65 for more info.
+    sinc2 = separable_sinc2_correction(volume_shape, device=volume.device)
+    volume = volume / sinc2
 
     # calculate DFT
     # volume center to array origin
-    dft = torch.fft.fftshift(volume, dim=(-3, -2, -1))
+    dft = torch.fft.ifftshift(volume, dim=(-3, -2, -1))
     dft = torch.fft.rfftn(dft, dim=(-3, -2, -1))
-
-    dft[..., 0, 0, 0] = 0.0  # Zero out mean to avoid low-res artifacts
 
     # fftshift the transformed volume so DC is at center
     dft = torch.fft.fftshift(dft, dim=(-3, -2))
@@ -122,17 +129,17 @@ def project_3d_to_2d(
 
     # transform back to real space
     projections = torch.fft.ifftshift(projections, dim=(-2,))  # ifftshift of 2D rfft
-    projections = torch.fft.irfftn(projections, dim=(-2, -1))
-    projections = torch.fft.ifftshift(
+    projections = torch.fft.irfftn(projections, dim=(-2, -1), s=volume_shape[-2:])
+    projections = torch.fft.fftshift(
         projections, dim=(-2, -1)
     )  # recenter 2D image in real space
 
     # unpad
     if pad_factor > 1.0:
-        projections = F.pad(projections, pad=[-p] * 4)
+        projections = F.pad(projections, pad=[-p] * 4, mode="constant", value=0.0)
 
-    # Account for the subtracted off mean value for the DFT
-    projections += volume_mean * d
+    # add the edge value back, scaled to the unpadded box size
+    projections = projections + edge_value * d
 
     return projections
 
@@ -197,26 +204,26 @@ def project_3d_to_2d_multichannel(
 
     if pad_factor < 1.0:
         raise ValueError("pad_factor must be >= 1.0")
+
+    # Subtract the (per-channel) edge value so the padded region continues smoothly
+    edge_value = compute_cube_face_averages(volume, n=4)  # (c,)
+    volume = volume - edge_value[..., None, None, None]
+
     if pad_factor > 1.0:
         p = int((volume.shape[-1] * (pad_factor - 1.0)) // 2)
-        volume = F.pad(volume, pad=[p] * 6)
+        volume = F.pad(volume, pad=[p] * 6, mode="constant", value=0.0)
 
     # set the shape as a variable
     volume_shape = tuple(volume.shape[-3:])
 
-    # premultiply by sinc2
-    grid = fftfreq_grid(
-        image_shape=volume_shape,
-        rfft=False,
-        fftshift=True,
-        norm=True,
-        device=volume.device,
-    )
-    volume = volume * torch.sinc(grid) ** 2
+    # divide by sinc^2 in real space to correct for the effect of trilinear
+    # interpolation during slice extraction. See issue #65 for more info.
+    sinc2 = separable_sinc2_correction(volume_shape, device=volume.device)
+    volume = volume / sinc2
 
     # calculate DFT
     # volume center to array origin
-    dft = torch.fft.fftshift(volume, dim=(-3, -2, -1))
+    dft = torch.fft.ifftshift(volume, dim=(-3, -2, -1))
     dft = torch.fft.rfftn(dft, dim=(-3, -2, -1))
     # actual fftshift of 3D rfft
     dft = torch.fft.fftshift(dft, dim=(-3, -2))
@@ -250,14 +257,18 @@ def project_3d_to_2d_multichannel(
 
     # transform back to real space
     projections = torch.fft.ifftshift(projections, dim=(-2,))  # ifftshift of 2D rfft
-    projections = torch.fft.irfftn(projections, dim=(-2, -1))
-    projections = torch.fft.ifftshift(
+    projections = torch.fft.irfftn(projections, dim=(-2, -1), s=volume_shape[-2:])
+    projections = torch.fft.fftshift(
         projections, dim=(-2, -1)
     )  # recenter 2D image in real space
 
     # unpad
     if pad_factor > 1.0:
-        projections = F.pad(projections, pad=[-p] * 4)
+        projections = F.pad(projections, pad=[-p] * 4, mode="constant", value=0.0)
+
+    # add the (per-channel) edge value back, scaled to the unpadded box size
+    projections = projections + edge_value[..., None, None] * d
+
     return projections
 
 
@@ -299,25 +310,25 @@ def project_2d_to_1d(
 
     if pad_factor < 1.0:
         raise ValueError("pad_factor must be >= 1.0")
+
+    # Subtract the edge value so the padded region continues smoothly from zero
+    edge_value = compute_square_edge_averages(image, n=4)  # NOTE: 4 is arbitrary
+    image = image - edge_value
+
     if pad_factor > 1.0:
         p = int((image.shape[-1] * (pad_factor - 1.0)) // 2)
-        image = F.pad(image, pad=[p] * 4)
+        image = F.pad(image, pad=[p] * 4, mode="constant", value=0.0)
 
     # set the shape as a variable
     image_shape = tuple(image.shape[-2:])
 
-    # premultiply by sinc2
-    grid = fftfreq_grid(
-        image_shape=image_shape,
-        rfft=False,
-        fftshift=True,
-        norm=True,
-        device=image.device,
-    )
-    image = image * torch.sinc(grid) ** 2
+    # divide by sinc^2 in real space to correct for the effect of trilinear
+    # interpolation during slice extraction. See issue #65 for more info.
+    sinc2 = separable_sinc2_correction(image_shape, device=image.device)
+    image = image / sinc2
 
     # calculate DFT
-    dft = torch.fft.fftshift(image, dim=(-2, -1))  # image center to array origin
+    dft = torch.fft.ifftshift(image, dim=(-2, -1))  # image center to array origin
     dft = torch.fft.rfftn(dft, dim=(-2, -1))
     dft = torch.fft.fftshift(dft, dim=(-2,))  # actual fftshift of 2D rfft
 
@@ -332,13 +343,16 @@ def project_2d_to_1d(
 
     # transform back to real space
     # not needed for 1D: torch.fft.ifftshift(projections, dim=(-2,))
-    projections = torch.fft.irfftn(projections, dim=(-1))
-    projections = torch.fft.ifftshift(
+    projections = torch.fft.irfftn(projections, dim=(-1), s=image_shape[-1:])
+    projections = torch.fft.fftshift(
         projections, dim=(-1)
     )  # recenter line in real space
 
     # unpad
     if pad_factor > 1.0:
-        projections = F.pad(projections, pad=[-p] * 2)
+        projections = F.pad(projections, pad=[-p] * 2, mode="constant", value=0.0)
+
+    # add the edge value back, scaled to the unpadded box size
+    projections = projections + edge_value * w
 
     return projections

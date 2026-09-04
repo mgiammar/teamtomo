@@ -31,7 +31,7 @@ jobs:
 
     steps:
       - uses: actions/checkout@v7
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@v7
@@ -42,7 +42,7 @@ jobs:
             uv.lock
 
       - name: Install all workspace dependencies
-        run: uv sync --all-packages --group test
+        run: uv sync --all-packages --group test --locked
 
       - name: Print environment info
         run: |
