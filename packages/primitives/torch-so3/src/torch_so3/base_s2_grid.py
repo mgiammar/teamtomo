@@ -255,48 +255,24 @@ def healpix_sectored_base_grid(
             f"nside_fine ({nside_fine}) must be >= nside_coarse ({nside_coarse})."
         )
 
-    n_sectors = 12 * nside_coarse**2
-    n_fine_total = 12 * nside_fine**2
-    k2 = n_fine_total // n_sectors  # exact because HEALPix is equal-area
-
     # depth_diff levels separate the coarse sector grid from the fine grid
     depth_diff = int(np.log2(nside_fine // nside_coarse))
     grid = HierarchicalS2Grid(nside_finest=nside_fine, n_levels=depth_diff + 1)
 
-    # Fine-pixel (NESTED) indices belonging to each coarse sector, in sector order
-    coarse_ipix = np.arange(n_sectors, dtype=np.int64)
-    fine_ipix = grid.convert_index(
-        coarse_ipix,
-        from_level=grid.coarsest_level,
-        to_level=grid.finest_level,
+    keep_mask, theta_deg, phi_deg = grid.sector_bounds_mask(
+        grid.coarsest_level,
+        grid.finest_level,
+        theta_min=theta_min,
+        theta_max=theta_max,
+        phi_min=phi_min,
+        phi_max=phi_max,
     )
-    fine_ipix = fine_ipix.reshape(n_sectors, k2)
 
-    theta_deg, phi_deg = grid.angle_from_index(
-        fine_ipix.reshape(-1), level=grid.finest_level, degrees=True
-    )
-    theta_deg = theta_deg.reshape(n_sectors, k2)
-    phi_deg = phi_deg.reshape(n_sectors, k2)
-
-    # Non-vectorized filtering since arrays can be extremely large
-    kept_phi = []
-    kept_theta = []
-    for ipix_c in range(n_sectors):
-        if np.any(
-            (theta_deg[ipix_c] >= theta_min)
-            & (theta_deg[ipix_c] <= theta_max)
-            & (phi_deg[ipix_c] >= phi_min)
-            & (phi_deg[ipix_c] <= phi_max)
-        ):
-            kept_phi.append(phi_deg[ipix_c])
-            kept_theta.append(theta_deg[ipix_c])
-
-    if not kept_phi:  # no sectors qualified
+    k2 = theta_deg.shape[1]
+    if not np.any(keep_mask):  # no sectors qualified
         return torch.empty((0, k2, 2), dtype=torch.float64)
 
-    angle_pairs = np.stack(
-        [np.stack(kept_phi, axis=0), np.stack(kept_theta, axis=0)], axis=-1
-    )
+    angle_pairs = np.stack([phi_deg[keep_mask], theta_deg[keep_mask]], axis=-1)
     return torch.tensor(angle_pairs, dtype=torch.float64)
 
 

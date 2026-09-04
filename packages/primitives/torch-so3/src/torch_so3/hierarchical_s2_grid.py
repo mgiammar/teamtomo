@@ -279,6 +279,84 @@ class HierarchicalS2Grid:
 
         return np.array(sorted(visited), dtype=np.int64)
 
+    def sector_child_angles(
+        self, coarse_level: int, fine_level: int, degrees: bool = True
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """(theta, phi) for every `fine_level` pixel, grouped by `coarse_level` parent.
+
+        Parameters
+        ----------
+        coarse_level: int
+            Level whose pixels define the sectors to group by.
+        fine_level: int
+            Level to sample child angles from within each sector.
+        degrees: bool
+            If True, output angles are in degrees. Otherwise returned in radians.
+            By default True.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray]
+            ``(theta, phi)``, each of shape ``(n_sectors, k)``.
+        """
+        coarse = self.get_level(coarse_level)
+        fine = self.get_level(fine_level)
+        n_sectors = coarse.npix
+        k = fine.npix // n_sectors
+
+        fine_ipix = self.convert_index(
+            coarse.all_indices(), from_level=coarse_level, to_level=fine_level
+        ).reshape(n_sectors, k)
+
+        theta, phi = self.angle_from_index(
+            fine_ipix.reshape(-1), level=fine_level, degrees=degrees
+        )
+        return theta.reshape(n_sectors, k), phi.reshape(n_sectors, k)
+
+    def sector_bounds_mask(
+        self,
+        coarse_level: int,
+        fine_level: int,
+        theta_min: float = 0.0,
+        theta_max: float = 180.0,
+        phi_min: float = 0.0,
+        phi_max: float = 360.0,
+        degrees: bool = True,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Which `coarse_level` sectors have a `fine_level` child within bounds.
+
+        Notes
+        -----
+        A sector is kept if any fine-level pixels fall within the given bounds rather
+        than requiring all fine-level pixels to be within the bounds.
+
+        Parameters
+        ----------
+        coarse_level: int
+            Level whose pixels define the sectors to test.
+        fine_level: int
+            Level to sample child angles from within each sector.
+        theta_min, theta_max, phi_min, phi_max: float
+            Bounds on the child angles, in degrees if `degrees` else radians.
+        degrees: bool
+            If True, the bounds and returned angles are in degrees. Otherwise both are
+            in radians. By default True.
+
+        Returns
+        -------
+        tuple[np.ndarray, np.ndarray, np.ndarray]
+            ``(keep_mask, theta, phi)``: a boolean mask of shape ``(n_sectors,)`` and
+            the grouped child angles of shape ``(n_sectors, k)`` used to compute it.
+        """
+        theta, phi = self.sector_child_angles(coarse_level, fine_level, degrees=degrees)
+        keep_mask = (
+            (theta >= theta_min)
+            & (theta <= theta_max)
+            & (phi >= phi_min)
+            & (phi <= phi_max)
+        ).any(axis=1)
+        return keep_mask, theta, phi
+
     def followup(
         self,
         ipix: npt.ArrayLike,
