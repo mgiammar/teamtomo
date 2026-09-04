@@ -1,10 +1,19 @@
 """Hierarchical S2 grid implementation based on healpy/healpix."""
 
+import platform
 from dataclasses import dataclass
 
-import healpy as hp
 import numpy as np
 import numpy.typing as npt
+
+if platform.system() != "Windows":
+    import healpy as hp
+
+
+def _check_healpy_available() -> None:
+    """Raise a clear error if running on Windows, where healpy is unavailable."""
+    if platform.system() == "Windows":
+        raise ImportError("healpy cannot be installed on Windows systems.")
 
 
 @dataclass(frozen=True)
@@ -17,6 +26,7 @@ class GridLevel:
     @property
     def npix(self) -> int:
         """Total number of pixels at this level."""
+        _check_healpy_available()
         return hp.nside2npix(self.nside)
 
     @property
@@ -26,10 +36,12 @@ class GridLevel:
 
     def angle_from_index(self, ipix: npt.ArrayLike) -> tuple[np.ndarray, np.ndarray]:
         """Get (theta, phi) in radians for pixel index/indices at this level."""
+        _check_healpy_available()
         return hp.pix2ang(self.nside, np.asarray(ipix), nest=True)
 
     def index_from_angle(self, theta: npt.ArrayLike, phi: npt.ArrayLike) -> np.ndarray:
         """Get the pixel index/indices closest to (theta, phi) angles at this level."""
+        _check_healpy_available()
         return hp.ang2pix(self.nside, np.asarray(theta), np.asarray(phi), nest=True)
 
     def all_indices(self) -> np.ndarray:
@@ -60,6 +72,7 @@ class HierarchicalS2Grid:
 
     def __init__(self, nside_finest: int, n_levels: int):
         """Initialize with validation checks."""
+        _check_healpy_available()
         if nside_finest & (nside_finest - 1) != 0:
             raise ValueError("nside_finest must be a power of 2")
         if nside_finest % (2 ** (n_levels - 1)) != 0:
@@ -80,10 +93,9 @@ class HierarchicalS2Grid:
     ) -> "HierarchicalS2Grid":
         """Create a grid whose finest level is closest to a target step, in degrees."""
         closest_nside = round(58.6 / target_step_deg)
-        closest_nside = 2 ** int(np.round(np.log2(closest_nside)))  # nearest power of 2
-
         if closest_nside < 1:
             raise ValueError("Target step size too large; resulting nside < 1.")
+        closest_nside = 2 ** int(np.round(np.log2(closest_nside)))  # nearest power of 2
 
         return cls(nside_finest=closest_nside, n_levels=n_levels)
 
